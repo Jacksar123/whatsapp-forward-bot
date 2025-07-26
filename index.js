@@ -55,7 +55,6 @@ async function startBotForUser(userId) {
       const categoriesPath = userFile(userId, "categories.json");
       const categories = fs.readJsonSync(categoriesPath);
 
-      // Clear previous assignments
       for (const cat of Object.values(categories)) cat.groups = [];
 
       const keywords = {
@@ -78,7 +77,7 @@ async function startBotForUser(userId) {
       fs.writeJsonSync(categoriesPath, categories, { spaces: 2 });
       console.log(`✅ ${userId}: Groups auto-categorised.`);
 
-      // 📨 Send help message
+      // 📨 Send welcome/help message
       const jid = sock.user?.id || process.env.MY_NUMBER + "@s.whatsapp.net";
       const helpMessage = `
 📣 *Bot Activated for ${userId}*
@@ -92,7 +91,7 @@ async function startBotForUser(userId) {
 /removegroup [Group Name]  
 /listgroups  
 /syncgroups (manual refresh)
-/stop (Stops Brodcast)
+/stop (Stops Broadcast)
       `.trim();
 
       await sock.sendMessage(jid, { text: helpMessage });
@@ -109,7 +108,7 @@ async function startBotForUser(userId) {
   listenForMedia(sock, userId);
 }
 
-// 🛠 Ensure user folders & files exist
+// 🛠 Setup user folders/files
 USERS.forEach((userId) => {
   const requiredFiles = [
     "auth",
@@ -144,3 +143,18 @@ USERS.forEach((userId) => {
   startBotForUser(userId);
 });
 
+// --- Express Server for API integration ---
+const express = require("express");
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("✅ Bot API is live");
+});
+
+// Example placeholder for QR route in future
+// app.get("/qr", (req, res) => { ... });
+
+app.listen(PORT, () => {
+  console.log(`✅ API running on port ${PORT}`);
+});
