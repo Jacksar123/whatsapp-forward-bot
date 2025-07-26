@@ -1,7 +1,7 @@
 require("dotenv").config();
+const express = require("express");
 const fs = require("fs-extra");
-const qrcode = require("qrcode-terminal");
-
+const qrcode = require("qrcode");
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -11,7 +11,9 @@ const {
 
 const { listenForMedia } = require("./shared/broadcast");
 
-const USERS = ["jackmeet"]; // Add more usernames here
+const app = express();
+const port = process.env.PORT || 10000;
+app.use(express.json());
 
 function userDir(userId) {
   return `./users/${userId}`;
@@ -23,7 +25,6 @@ function userFile(userId, filename) {
 
 async function startBotForUser(userId) {
   console.log(`🚀 Launching bot for user: ${userId}`);
-
   const authDir = userFile(userId, "auth");
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -31,7 +32,7 @@ async function startBotForUser(userId) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: true
+    printQRInTerminal: false
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -39,19 +40,22 @@ async function startBotForUser(userId) {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    if (qr) {
+      const qrPath = userFile(userId, "qr.png");
+      await qrcode.toFile(qrPath, qr);
+      console.log(`🧾 ${userId}: QR code generated.`);
+    }
+
     if (connection === "open") {
       console.log(`✅ ${userId}: Connected to WhatsApp!`);
 
-      // 🔄 Auto-sync all groups
       const chats = await sock.groupFetchAllParticipating();
       const groups = Object.entries(chats).map(([jid, group]) => ({
         id: jid,
         name: group.subject
       }));
       fs.writeJsonSync(userFile(userId, "all_groups.json"), groups, { spaces: 2 });
-      console.log(`✅ ${userId}: Found ${groups.length} groups. Saved to all_groups.json.`);
 
-      // 🧠 Auto-categorise based on group names
       const categoriesPath = userFile(userId, "categories.json");
       const categories = fs.readJsonSync(categoriesPath);
 
@@ -75,9 +79,7 @@ async function startBotForUser(userId) {
       }
 
       fs.writeJsonSync(categoriesPath, categories, { spaces: 2 });
-      console.log(`✅ ${userId}: Groups auto-categorised.`);
 
-      // 📨 Send welcome/help message
       const jid = sock.user?.id || process.env.MY_NUMBER + "@s.whatsapp.net";
       const helpMessage = `
 📣 *Bot Activated for ${userId}*
@@ -91,7 +93,7 @@ async function startBotForUser(userId) {
 /removegroup [Group Name]  
 /listgroups  
 /syncgroups (manual refresh)
-/stop (Stops Broadcast)
+/stop (Stops Brodcast)
       `.trim();
 
       await sock.sendMessage(jid, { text: helpMessage });
@@ -108,8 +110,7 @@ async function startBotForUser(userId) {
   listenForMedia(sock, userId);
 }
 
-// 🛠 Setup user folders/files
-USERS.forEach((userId) => {
+function ensureUserFiles(userId) {
   const requiredFiles = [
     "auth",
     "all_groups.json",
@@ -139,22 +140,33 @@ USERS.forEach((userId) => {
       }
     }
   });
+}
 
-  startBotForUser(userId);
+// === API ROUTES ===
+
+app.post("/start-bot", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+  try {
+    ensureUserFiles(userId);
+    await startBotForUser(userId);
+    return res.json({ success: true, message: `Bot started for ${userId}` });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Failed to start bot" });
+  }
 });
 
-// --- Express Server for API integration ---
-const express = require("express");
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => {
-  res.send("✅ Bot API is live");
+app.get("/qr/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const qrPath = userFile(userId, "qr.png");
+  if (!fs.existsSync(qrPath)) return res.status(404).send("QR not found");
+  res.sendFile(qrPath, { root: "." });
 });
 
-// Example placeholder for QR route in future
-// app.get("/qr", (req, res) => { ... });
+app.get("/", (_, res) => res.send("✅ WhatsApp bot backend is live."));
 
-app.listen(PORT, () => {
-  console.log(`✅ API running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`✅ API running on port ${port}`);
 });
