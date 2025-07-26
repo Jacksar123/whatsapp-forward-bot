@@ -1,7 +1,10 @@
 require("dotenv").config();
-const express = require("express");
 const fs = require("fs-extra");
-const qrcode = require("qrcode");
+const express = require("express");
+const cors = require("cors");
+const app = express();
+const port = process.env.PORT || 10000;
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -11,18 +14,19 @@ const {
 
 const { listenForMedia } = require("./shared/broadcast");
 
-const app = express();
-const port = process.env.PORT || 10000;
+// Middleware
+app.use(cors());
 app.use(express.json());
 
+// Utility functions
 function userDir(userId) {
   return `./users/${userId}`;
 }
-
 function userFile(userId, filename) {
   return `${userDir(userId)}/${filename}`;
 }
 
+// 🔄 Start bot function
 async function startBotForUser(userId) {
   console.log(`🚀 Launching bot for user: ${userId}`);
   const authDir = userFile(userId, "auth");
@@ -32,23 +36,16 @@ async function startBotForUser(userId) {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: false
+    printQRInTerminal: true
   });
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      const qrPath = userFile(userId, "qr.png");
-      await qrcode.toFile(qrPath, qr);
-      console.log(`🧾 ${userId}: QR code generated.`);
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === "open") {
       console.log(`✅ ${userId}: Connected to WhatsApp!`);
-
       const chats = await sock.groupFetchAllParticipating();
       const groups = Object.entries(chats).map(([jid, group]) => ({
         id: jid,
@@ -70,8 +67,7 @@ async function startBotForUser(userId) {
       for (const group of groups) {
         const name = group.name.toLowerCase();
         for (const [catId, cat] of Object.entries(categories)) {
-          const match = keywords[cat.name]?.some(keyword => name.includes(keyword));
-          if (match) {
+          if (keywords[cat.name]?.some(keyword => name.includes(keyword))) {
             cat.groups.push(group);
             break;
           }
@@ -94,10 +90,9 @@ async function startBotForUser(userId) {
 /listgroups  
 /syncgroups (manual refresh)
 /stop (Stops Brodcast)
-      `.trim();
+`.trim();
 
       await sock.sendMessage(jid, { text: helpMessage });
-      console.log(`📨 ${userId}: Welcome message sent.`);
     }
 
     if (connection === "close") {
@@ -110,7 +105,17 @@ async function startBotForUser(userId) {
   listenForMedia(sock, userId);
 }
 
-function ensureUserFiles(userId) {
+// 🧪 Health check route
+app.get("/", (req, res) => {
+  res.status(200).send("API is live");
+});
+
+// 🔐 Endpoint Lovable will call to generate bot
+app.post("/api/create-bot", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
+
+  // Ensure folders/files exist
   const requiredFiles = [
     "auth",
     "all_groups.json",
@@ -140,33 +145,12 @@ function ensureUserFiles(userId) {
       }
     }
   });
-}
 
-// === API ROUTES ===
-
-app.post("/start-bot", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "Missing userId" });
-
-  try {
-    ensureUserFiles(userId);
-    await startBotForUser(userId);
-    return res.json({ success: true, message: `Bot started for ${userId}` });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Failed to start bot" });
-  }
+  await startBotForUser(userId);
+  res.status(200).json({ success: true });
 });
 
-app.get("/qr/:userId", async (req, res) => {
-  const { userId } = req.params;
-  const qrPath = userFile(userId, "qr.png");
-  if (!fs.existsSync(qrPath)) return res.status(404).send("QR not found");
-  res.sendFile(qrPath, { root: "." });
-});
-
-app.get("/", (_, res) => res.send("✅ WhatsApp bot backend is live."));
-
+// 🚀 Start server
 app.listen(port, () => {
   console.log(`✅ API running on port ${port}`);
 });
