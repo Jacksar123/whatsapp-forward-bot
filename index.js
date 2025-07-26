@@ -1,9 +1,8 @@
 require("dotenv").config();
-const fs = require("fs-extra");
 const express = require("express");
+const fs = require("fs-extra");
+const qrcode = require("qrcode-terminal");
 const cors = require("cors");
-const app = express();
-const port = process.env.PORT || 10000;
 
 const {
   default: makeWASocket,
@@ -14,21 +13,21 @@ const {
 
 const { listenForMedia } = require("./shared/broadcast");
 
-// Middleware
-app.use(cors());
+const app = express();
 app.use(express.json());
+app.use(cors());
 
-// Utility functions
 function userDir(userId) {
   return `./users/${userId}`;
 }
+
 function userFile(userId, filename) {
   return `${userDir(userId)}/${filename}`;
 }
 
-// 🔄 Start bot function
 async function startBotForUser(userId) {
   console.log(`🚀 Launching bot for user: ${userId}`);
+
   const authDir = userFile(userId, "auth");
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -46,12 +45,14 @@ async function startBotForUser(userId) {
 
     if (connection === "open") {
       console.log(`✅ ${userId}: Connected to WhatsApp!`);
+
       const chats = await sock.groupFetchAllParticipating();
       const groups = Object.entries(chats).map(([jid, group]) => ({
         id: jid,
         name: group.subject
       }));
       fs.writeJsonSync(userFile(userId, "all_groups.json"), groups, { spaces: 2 });
+      console.log(`✅ ${userId}: Found ${groups.length} groups.`);
 
       const categoriesPath = userFile(userId, "categories.json");
       const categories = fs.readJsonSync(categoriesPath);
@@ -59,15 +60,16 @@ async function startBotForUser(userId) {
       for (const cat of Object.values(categories)) cat.groups = [];
 
       const keywords = {
-        Shoes: ["shoe", "crep", "kick", "jordan", "dunk", "yeezy", "rep", "airmax", "foam", "airforce", "trainer", "aj1"],
-        Clothing: ["drip", "hoodie", "tee", "fashion", "fit", "puffer", "northface", "supreme", "trapstar", "moncler", "cargo", "bape"],
-        Tech: ["ps5", "switch", "iphone", "ipad", "macbook", "gadget", "tech", "electronic", "airpod", "console", "samsung"]
+        Shoes: ["shoe", "crep", "kick", "jordan"],
+        Clothing: ["hoodie", "tee", "drip"],
+        Tech: ["iphone", "macbook", "ps5"]
       };
 
       for (const group of groups) {
         const name = group.name.toLowerCase();
         for (const [catId, cat] of Object.entries(categories)) {
-          if (keywords[cat.name]?.some(keyword => name.includes(keyword))) {
+          const match = keywords[cat.name]?.some(keyword => name.includes(keyword));
+          if (match) {
             cat.groups.push(group);
             break;
           }
@@ -80,19 +82,16 @@ async function startBotForUser(userId) {
       const helpMessage = `
 📣 *Bot Activated for ${userId}*
 
-👟 Send a product image to start broadcasting  
-🔢 Then reply 1 = *Shoes*, 2 = *Tech*, 3 = *Clothing*
-
-🧠 Auto-categorises based on group name keywords  
-🛠 Commands:
+Send a product image to broadcast.
+Commands:
 /addgroup [Group Name] [Category]  
 /removegroup [Group Name]  
-/listgroups  
-/syncgroups (manual refresh)
-/stop (Stops Brodcast)
-`.trim();
+/syncgroups  
+/stop
+      `.trim();
 
       await sock.sendMessage(jid, { text: helpMessage });
+      console.log(`📨 ${userId}: Help message sent.`);
     }
 
     if (connection === "close") {
@@ -105,17 +104,11 @@ async function startBotForUser(userId) {
   listenForMedia(sock, userId);
 }
 
-// 🧪 Health check route
-app.get("/", (req, res) => {
-  res.status(200).send("API is live");
-});
+// 👇 API to create a new bot for a user
+app.post("/create-user", async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: "Username required" });
 
-// 🔐 Endpoint Lovable will call to generate bot
-app.post("/api/create-bot", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ success: false, error: "Missing userId" });
-
-  // Ensure folders/files exist
   const requiredFiles = [
     "auth",
     "all_groups.json",
@@ -123,34 +116,33 @@ app.post("/api/create-bot", async (req, res) => {
     "message_logs.json"
   ];
 
-  fs.ensureDirSync(userDir(userId));
-  fs.ensureDirSync(userFile(userId, "auth"));
+  fs.ensureDirSync(userDir(username));
+  fs.ensureDirSync(userFile(username, "auth"));
 
   requiredFiles.forEach((file) => {
-    const fullPath = userFile(userId, file);
+    const fullPath = userFile(username, file);
     if (!fs.existsSync(fullPath)) {
-      if (file.endsWith(".json")) {
-        const defaultData = file === "categories.json"
-          ? {
-              "1": { name: "Shoes", groups: [] },
-              "2": { name: "Tech", groups: [] },
-              "3": { name: "Clothing", groups: [] }
-            }
-          : file === "message_logs.json"
-          ? []
-          : {};
-        fs.writeJsonSync(fullPath, defaultData, { spaces: 2 });
-      } else {
-        fs.ensureFileSync(fullPath);
-      }
+      const defaultData = file === "categories.json"
+        ? {
+            "1": { name: "Shoes", groups: [] },
+            "2": { name: "Tech", groups: [] },
+            "3": { name: "Clothing", groups: [] }
+          }
+        : file === "message_logs.json"
+        ? []
+        : {};
+      fs.writeJsonSync(fullPath, defaultData, { spaces: 2 });
     }
   });
 
-  await startBotForUser(userId);
-  res.status(200).json({ success: true });
+  startBotForUser(username);
+  res.json({ success: true, message: `Bot launched for ${username}` });
 });
 
-// 🚀 Start server
-app.listen(port, () => {
-  console.log(`✅ API running on port ${port}`);
+// ✅ Health check route
+app.get("/", (req, res) => res.send("Multi-user WhatsApp bot is running."));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`✅ API running on port ${PORT}`);
 });
