@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const P = require('pino');
 const express = require('express');
+const cors = require('cors'); // <— NEW
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -239,6 +240,12 @@ function extractNumericChoice(m) {
 
 const app = express();
 app.use(express.json());
+
+// Allow Lovable to call us from the browser
+app.use(cors({
+  origin: 'https://whats-broadcast-hub.lovable.app'
+}));
+// For testing instead, you could use: app.use(cors());
 
 app.post('/create-user', async (req, res) => {
   try {
