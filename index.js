@@ -1,11 +1,8 @@
 // index.js
-// Multi-user WhatsApp broadcaster (auto-categorisation, batch sending, category prompt, full UX)
-
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
 const express = require('express');
-const cors = require('cors'); // <— NEW
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -32,6 +29,8 @@ function userBase(username) { return path.join(__dirname, 'users', username); }
 function writeJSON(file, data) { ensureDir(path.dirname(file)); fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file)); } catch { return fallback; } }
 function normaliseJid(jid) { return jidNormalizedUser(jid); }
+function generateUsername() { return `user_${Math.random().toString(16).slice(2, 10)}`; }
+
 function categoriseGroupName(name) {
   const n = name.toLowerCase();
   for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
@@ -241,18 +240,15 @@ function extractNumericChoice(m) {
 const app = express();
 app.use(express.json());
 
-// Allow Lovable to call us from the browser
-app.use(cors({
-  origin: 'https://whats-broadcast-hub.lovable.app'
-}));
-// For testing instead, you could use: app.use(cors());
-
 app.post('/create-user', async (req, res) => {
   try {
-    const { username } = req.body || {};
-    if (!username) return res.status(400).json({ error: 'username required' });
+    let { username } = req.body || {};
+    if (!username) {
+      username = generateUsername();
+      console.log(`[server] Auto-generated username: ${username}`);
+    }
     await startUserSession(username);
-    res.json({ ok: true });
+    res.json({ ok: true, username });
   } catch (e) {
     console.error('create-user error', e);
     res.status(500).json({ error: e.message });
@@ -269,5 +265,4 @@ app.get('/get-qr', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`POST /create-user { "username": "jack" }`);
 });
