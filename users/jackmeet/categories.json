@@ -1,5 +1,5 @@
 {
-  "1": {
+  "Shoes": {
     "name": "Shoes",
     "groups": [
       {
@@ -44,12 +44,12 @@
       }
     ]
   },
-  "2": {
-    "name": "Tech",
+  "Clothing": {
+    "name": "Clothing",
     "groups": []
   },
-  "3": {
-    "name": "Clothing",
+  "Tech": {
+    "name": "Tech",
     "groups": []
   }
 }
