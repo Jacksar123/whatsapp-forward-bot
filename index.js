@@ -1,8 +1,9 @@
-// index.js
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
 const express = require('express');
+const cors = require('cors');
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -13,7 +14,7 @@ const {
   jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const BATCH_SIZE = 5;
 const BATCH_DELAY_MS = 5000;
 const DEFAULT_CATEGORIES = ['Shoes', 'Tech', 'Clothing'];
@@ -239,6 +240,16 @@ function extractNumericChoice(m) {
 
 const app = express();
 app.use(express.json());
+
+// ✅ Full CORS support
+app.use(cors({
+  origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+app.options('*', cors());
 
 app.post('/create-user', async (req, res) => {
   try {
