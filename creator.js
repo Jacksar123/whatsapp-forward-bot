@@ -1,9 +1,7 @@
-// creator.js — Slim session server with proper CORS
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
-const QRCode = require('qrcode');
 const P = require('pino');
 const {
   default: makeWASocket,
@@ -17,7 +15,6 @@ const {
 
 const PORT = process.env.PORT || 3001;
 const USERS = {};
-
 const DEFAULT_CATEGORIES = ['Shoes', 'Tech', 'Clothing'];
 const CATEGORY_KEYWORDS = {
   Shoes: ['shoe', 'sneaker', 'crep', 'yeezy', 'jordan', 'footwear', 'nike', 'adidas', 'sb', 'dunk'],
@@ -25,7 +22,7 @@ const CATEGORY_KEYWORDS = {
   Clothing: ['clothing', 'threads', 'garms', 'fashion', 'streetwear', 'hoodie', 'tees', 'fit', 'wear']
 };
 
-// Utilities
+// Utility functions
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 function userBase(username) { return path.join(__dirname, 'users', username); }
 function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
@@ -87,7 +84,6 @@ async function startUserSession(username) {
 
   const base = userBase(username);
   ensureDir(base);
-
   const logger = P({ level: 'silent' });
   const { state, saveCreds } = await useMultiFileAuthState(path.join(base, 'auth_info'));
   const { version } = await fetchLatestBaileysVersion();
@@ -249,17 +245,22 @@ async function handleMessage(username, msg) {
   }
 }
 
-// ------------------- EXPRESS -------------------
+// ------------------- EXPRESS + CORS -------------------
 const app = express();
 app.use(express.json());
 
-// ✅ CORS FIX — Multi-origin frontend access
-app.use(cors({
+// ✅ Step 1: CORS middleware
+const corsOptions = {
   origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
+
+// ✅ Step 2: Explicitly respond to OPTIONS preflight
+app.options('*', cors(corsOptions));
 
 app.post('/create-user', async (req, res) => {
   try {
@@ -285,7 +286,5 @@ app.get('/get-qr', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ creator.js listening on :${PORT}`);
-  console.log('POST /create-user  (body optional, auto-generates username)');
-  console.log('GET  /get-qr?username=<user>');
+  console.log(`✅ creator.js running on port ${PORT}`);
 });
