@@ -17,7 +17,7 @@ const {
   jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 
-const PORT = process.env.PORT || 3001; // run this on a different port if you also run index.js
+const PORT = process.env.PORT || 3001;
 const USERS = {};
 
 const DEFAULT_CATEGORIES = ['Shoes', 'Tech', 'Clothing'];
@@ -39,7 +39,7 @@ async function wipeAuth(username) {
     const dir = path.join(userBase(username), 'auth_info');
     fs.rmSync(dir, { recursive: true, force: true });
     console.log(`[${username}] wiped auth_info`);
-  } catch(err) {
+  } catch (err) {
     console.error(`[${username}] wipeAuth failed`, err);
   }
 }
@@ -80,16 +80,10 @@ async function autoScanAndCategorise(sock, username) {
 }
 
 async function startUserSession(username) {
-  // prevent multi-sockets
-  const existing = USERS[username];
-  if (existing?.sock?.user) {
-    console.log(`[${username}] Already connected. Not starting a new session.`);
-    return existing;
-  }
-  if (existing?.sock) {
-    console.log(`[${username}] Cleaning up previous socket...`);
-    try { await existing.sock.logout(); } catch {}
-    try { existing.sock.end(); } catch {}
+  if (USERS[username]?.sock?.user) return USERS[username];
+  if (USERS[username]?.sock) {
+    try { await USERS[username].sock.logout(); } catch {}
+    try { USERS[username].sock.end(); } catch {}
   }
 
   const base = userBase(username);
@@ -120,26 +114,18 @@ async function startUserSession(username) {
 
     if (events['connection.update']) {
       const { connection, lastDisconnect, qr } = events['connection.update'];
-
-      if (qr) {
-        USERS[username].qr = qr;
-        console.log(`[${username}] QR generated`);
-      }
+      if (qr) USERS[username].qr = qr;
 
       if (connection === 'close') {
         const status = lastDisconnect?.error?.output?.statusCode;
         const msg = lastDisconnect?.error?.message;
-        console.log(`[${username}] connection closed. Reason: ${status || 'unknown'}, Message: ${msg || 'none'}`);
-
-        // QR expired -> regenerate automatically
         if (status === 408 || (msg && msg.includes('QR refs attempts ended'))) {
           await wipeAuth(username);
           setTimeout(() => startUserSession(username), 1000);
           return;
         }
 
-        const shouldReconnect = status !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
+        if (status !== DisconnectReason.loggedOut) {
           setTimeout(() => startUserSession(username), 2000);
         } else {
           console.log(`[${username}] Logged out`);
@@ -147,8 +133,7 @@ async function startUserSession(username) {
       }
 
       if (connection === 'open') {
-        console.log(`[${username}] connected`);
-        USERS[username].qr = null; // clear QR so frontend knows it's connected
+        USERS[username].qr = null;
         await autoScanAndCategorise(sock, username);
       }
     }
@@ -171,10 +156,12 @@ function getMessageText(m) {
   if (m.videoMessage?.caption) return m.videoMessage.caption;
   return '';
 }
+
 function extractNumericChoice(m) {
   const txt = getMessageText(m);
   return txt && /^\d+$/.test(txt.trim()) ? txt.trim() : null;
 }
+
 function buildCategoryPrompt(username) {
   const { categories, allGroups } = USERS[username];
   const lines = [];
@@ -267,9 +254,8 @@ async function handleMessage(username, msg) {
 // ------------------- EXPRESS -------------------
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: '*' })); // adjust to your domain if needed
+app.use(cors({ origin: 'https://whats-broadcast-hub.lovable.app' })); // ✅ CORS fix
 
-// Start session (username optional)
 app.post('/create-user', async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -285,7 +271,6 @@ app.post('/create-user', async (req, res) => {
   }
 });
 
-// Return QR string
 app.get('/get-qr', (req, res) => {
   const { username } = req.query;
   if (!username) return res.status(400).json({ error: 'username required' });
@@ -294,72 +279,8 @@ app.get('/get-qr', (req, res) => {
   res.json({ qr: u.qr });
 });
 
-// Render QR as PNG
-app.get('/qr-image', async (req, res) => {
-  const { username } = req.query;
-  if (!username) return res.status(400).send('missing username');
-  const u = USERS[username];
-  if (!u || !u.qr) return res.status(404).send('QR not available');
-  try {
-    res.setHeader('Content-Type', 'image/png');
-    const buf = await QRCode.toBuffer(u.qr);
-    res.send(buf);
-  } catch (e) {
-    console.error('qr-image error', e);
-    res.status(500).send('render failed');
-  }
-});
-
-// Simple auto-refresh QR page
-app.get('/qr-page', (req, res) => {
-  const { username } = req.query;
-  if (!username) return res.status(400).send('missing username');
-
-  const html = `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>QR for ${username}</title>
-  <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:14px}</style>
-</head>
-<body>
-  <h2>Scan this with WhatsApp</h2>
-  <img id="qr" src="/qr-image?username=${username}&ts=${Date.now()}" width="320" height="320" onerror="document.getElementById('status').innerText='QR not ready (or connected). Retrying…'"/>
-  <div id="status"></div>
-  <script>
-    setInterval(() => {
-      const img = document.getElementById('qr');
-      img.src = '/qr-image?username=${username}&ts=' + Date.now();
-    }, 2000);
-  </script>
-</body>
-</html>`;
-  res.setHeader('Content-Type', 'text/html');
-  res.send(html);
-});
-
-// Reset user programmatically (handy!)
-app.post('/reset-user', async (req, res) => {
-  try {
-    const { username } = req.body || {};
-    if (!username) return res.status(400).json({ error: 'username required' });
-    await wipeAuth(username);
-    if (USERS[username]?.sock) {
-      try { USERS[username].sock.end(); } catch {}
-      delete USERS[username];
-    }
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('reset-user error', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`✅ creator.js listening on :${PORT}`);
   console.log('POST /create-user  (body optional, auto-generates username)');
   console.log('GET  /get-qr?username=<user>');
-  console.log('GET  /qr-page?username=<user>');
-  console.log('POST /reset-user { "username": "<user>" }');
 });
