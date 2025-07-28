@@ -1,6 +1,4 @@
-// creator.js
-// Slim, auto-username, auto-QR-regenerating WhatsApp session server
-
+// creator.js — Slim session server with proper CORS
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -27,6 +25,7 @@ const CATEGORY_KEYWORDS = {
   Clothing: ['clothing', 'threads', 'garms', 'fashion', 'streetwear', 'hoodie', 'tees', 'fit', 'wear']
 };
 
+// Utilities
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 function userBase(username) { return path.join(__dirname, 'users', username); }
 function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
@@ -124,7 +123,6 @@ async function startUserSession(username) {
           setTimeout(() => startUserSession(username), 1000);
           return;
         }
-
         if (status !== DisconnectReason.loggedOut) {
           setTimeout(() => startUserSession(username), 2000);
         } else {
@@ -254,7 +252,14 @@ async function handleMessage(username, msg) {
 // ------------------- EXPRESS -------------------
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: 'https://whats-broadcast-hub.lovable.app' })); // ✅ CORS fix
+
+// ✅ CORS FIX — Multi-origin frontend access
+app.use(cors({
+  origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 
 app.post('/create-user', async (req, res) => {
   try {
