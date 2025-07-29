@@ -64,6 +64,7 @@ async function autoScanAndCategorise(sock, username) {
   writeJSON(catPath, categories);
   USERS[username].allGroups = allGroups;
   USERS[username].categories = categories;
+  console.log(`[${username}] Auto-scan complete. Groups: ${groups.length}`);
 }
 
 function buildCategoryPrompt(username) {
@@ -111,9 +112,13 @@ async function sendInBatches(sock, username, from, jids, messageContent) {
 }
 
 async function startUserSession(username) {
+  if (USERS[username]?.sock) {
+    console.log(`[${username}] Session already running`);
+    return USERS[username];
+  }
+
   const base = userBase(username);
   ensureDir(base);
-
   const logger = P({ level: 'silent' });
   const { state, saveCreds } = await useMultiFileAuthState(path.join(base, 'auth_info'));
   const { version } = await fetchLatestBaileysVersion();
@@ -128,7 +133,6 @@ async function startUserSession(username) {
   USERS[username] = {
     sock,
     qr: null,
-    connected: false,
     categories: readJSON(path.join(base, 'categories.json'), DEFAULT_CATEGORIES.reduce((acc, c) => ({ ...acc, [c]: [] }), {})),
     allGroups: readJSON(path.join(base, 'all_groups.json'), {}),
     pendingImage: null,
@@ -140,19 +144,18 @@ async function startUserSession(username) {
 
     if (events['connection.update']) {
       const { connection, lastDisconnect, qr } = events['connection.update'];
-      if (qr) {
-        USERS[username].qr = qr;
-        USERS[username].connected = false;
-      }
-      if (connection === 'open') {
-        USERS[username].connected = true;
-        USERS[username].qr = null;
-        await autoScanAndCategorise(sock, username);
-      }
+      if (qr) USERS[username].qr = qr;
+
       if (connection === 'close') {
-        USERS[username].connected = false;
-        const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
+        const reason = lastDisconnect?.error?.output?.statusCode;
+        const msg = lastDisconnect?.error?.message;
+        console.log(`[${username}] connection closed. Reason: ${reason || 'unknown'}, Message: ${msg || 'none'}`);
+        const shouldReconnect = (reason !== DisconnectReason.loggedOut);
         if (shouldReconnect) setTimeout(() => startUserSession(username), 2000);
+        else console.log(`[${username}] Logged out.`);
+      } else if (connection === 'open') {
+        console.log(`[${username}] connected`);
+        await autoScanAndCategorise(sock, username);
       }
     }
 
@@ -167,6 +170,7 @@ async function startUserSession(username) {
 }
 
 async function handleMessage(username, msg) {
+  console.log(`[${username}] Received message:`, JSON.stringify(msg, null, 2)); // ✅ DEBUG LOG
   const u = USERS[username];
   const sock = u.sock;
   const m = msg.message;
@@ -236,10 +240,14 @@ function extractNumericChoice(m) {
 
 const app = express();
 app.use(express.json());
+
 app.use(cors({
   origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+app.options('*', cors());
 
 app.post('/create-user', async (req, res) => {
   try {
@@ -248,7 +256,7 @@ app.post('/create-user', async (req, res) => {
       username = generateUsername();
       console.log(`[server] Auto-generated username: ${username}`);
     }
-    const user = USERS[username] || await startUserSession(username);
+    await startUserSession(username);
     res.json({ ok: true, username });
   } catch (e) {
     console.error('create-user error', e);
@@ -261,14 +269,7 @@ app.get('/get-qr', (req, res) => {
   if (!username) return res.status(400).json({ error: 'username required' });
   const u = USERS[username];
   if (!u) return res.status(404).json({ error: 'User not found or not started yet' });
-
-  if (u.connected) {
-    return res.json({ connected: true, qr: null });
-  } else if (u.qr) {
-    return res.json({ connected: false, qr: u.qr });
-  } else {
-    return res.json({ connected: false, qr: null });
-  }
+  res.json({ qr: u.qr });
 });
 
 app.listen(PORT, () => {
