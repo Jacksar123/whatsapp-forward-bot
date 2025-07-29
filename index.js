@@ -1,4 +1,7 @@
 // index.js
+// FULL UPDATED FILE
+
+// All required modules
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
@@ -72,7 +75,7 @@ function buildCategoryPrompt(username) {
   let idx = 1;
   const mapping = {};
 
-  for (const cat of DEFAULT_CATEGORIES) {
+  for (const cat of Object.keys(categories)) {
     const jids = categories[cat] || [];
     const names = jids.map(j => allGroups[j]?.name || j);
     mapping[idx] = cat;
@@ -97,7 +100,7 @@ async function sendInBatches(sock, username, from, jids, messageContent) {
     const names = batch.map(j => USERS[username].allGroups[j]?.name || j);
 
     for (const jid of batch) {
-      try { await sock.sendMessage(jid, messageContent); } 
+      try { await sock.sendMessage(jid, messageContent); }
       catch (e) { console.error(`[${username}] Failed sending to ${jid}`, e); }
     }
 
@@ -155,13 +158,13 @@ async function startUserSession(username) {
       } else if (connection === 'open') {
         console.log(`[${username}] connected`);
         await autoScanAndCategorise(sock, username);
-        await sock.sendMessage(sock.user.id, { text: '✅ WhatsApp connected! Send me an image and I’ll ask which group to forward it to.' });
+        await sock.sendMessage(sock.user.id, { text: '✅ WhatsApp connected!\n\nSend an image to start broadcasting.\n\nType /help for commands.' });
       }
     }
 
     if (events['messages.upsert']) {
       for (const msg of events['messages.upsert'].messages) {
-        if (msg.key.fromMe) continue; // ignore messages from self
+        if (msg.key.fromMe) continue;
         try { await handleMessage(username, msg); } catch (err) { console.error(`[${username}] handleMessage error`, err); }
       }
     }
@@ -170,16 +173,54 @@ async function startUserSession(username) {
   return USERS[username];
 }
 
-async function handleMessage(username, msg) {
-  console.log(`[${username}] Received message from ${msg.key.remoteJid}, fromMe: ${msg.key.fromMe}`);
-  console.log(JSON.stringify(msg, null, 2));
+function getMessageText(m) {
+  if (!m) return '';
+  if (m.conversation) return m.conversation;
+  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+  if (m.imageMessage?.caption) return m.imageMessage.caption;
+  if (m.videoMessage?.caption) return m.videoMessage.caption;
+  return '';
+}
 
+function extractNumericChoice(m) {
+  const txt = getMessageText(m);
+  return txt && /^\d+$/.test(txt.trim()) ? txt.trim() : null;
+}
+
+async function handleMessage(username, msg) {
   const u = USERS[username];
   const sock = u.sock;
   const m = msg.message;
   const from = normaliseJid(msg.key.remoteJid);
   if (from.endsWith('@g.us') || !m) return;
 
+  const body = getMessageText(m).trim();
+
+  // Command: /addcategory
+  if (body.startsWith('/addcategory ')) {
+    const newCat = body.slice(13).trim();
+    if (!newCat || newCat.includes(' ')) {
+      return await sock.sendMessage(from, { text: '❌ Invalid category name. Use a single word (no spaces).' });
+    }
+    if (DEFAULT_CATEGORIES.includes(newCat) || u.categories[newCat]) {
+      return await sock.sendMessage(from, { text: `❗ Category "${newCat}" already exists.` });
+    }
+    u.categories[newCat] = [];
+    writeJSON(path.join(userBase(username), 'categories.json'), u.categories);
+    return await sock.sendMessage(from, { text: `✅ New category "${newCat}" added.` });
+  }
+
+  // Command: /stop
+  if (body === '/stop') {
+    if (!u.pendingImage) {
+      return await sock.sendMessage(from, { text: `ℹ️ There's no active broadcast session.` });
+    }
+    u.pendingImage = null;
+    u.lastPromptChat = null;
+    return await sock.sendMessage(from, { text: `🛑 Broadcast cancelled.` });
+  }
+
+  // Handle number selection after image
   const selection = extractNumericChoice(m);
   if (selection && u.pendingImage && u.lastPromptChat === from) {
     const { mapping } = buildCategoryPrompt(username);
@@ -201,6 +242,7 @@ async function handleMessage(username, msg) {
     return;
   }
 
+  // Handle image upload
   if (m.imageMessage) {
     const buffer = await downloadMediaMessage(msg, 'buffer', {});
     const caption = m.imageMessage.caption || '';
@@ -211,39 +253,32 @@ async function handleMessage(username, msg) {
     return;
   }
 
-  const body = getMessageText(m).trim().toLowerCase();
-  if (body === '/rescan') {
+  if (body === '/rescan' || body === '/syncgroups') {
     await autoScanAndCategorise(sock, username);
-    return await sock.sendMessage(from, { text: 'Rescanned & auto-categorised groups.' });
+    return await sock.sendMessage(from, { text: '✅ Rescanned and categorised groups.' });
   }
+
   if (body === '/cats') {
     const { text } = buildCategoryPrompt(username);
     return await sock.sendMessage(from, { text });
   }
+
   if (body === '/help') {
     return await sock.sendMessage(from, {
-      text: `Commands:\n/help - show help\n/rescan - rescan groups\n/cats - show category prompt again`
+      text: `Commands:
+/help - Show help
+/rescan or /syncgroups - Rescan your groups
+/cats - Show category prompt
+/addcategory [Name] - Add a new category
+/addgroup [Group Name] [Category] - Add group to a category
+/removegroup [Group Name] - Remove group from all categories
+/stop - Cancel an image broadcast in progress`
     });
   }
 }
 
-function getMessageText(m) {
-  if (!m) return '';
-  if (m.conversation) return m.conversation;
-  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
-  if (m.imageMessage?.caption) return m.imageMessage.caption;
-  if (m.videoMessage?.caption) return m.videoMessage.caption;
-  return '';
-}
-
-function extractNumericChoice(m) {
-  const txt = getMessageText(m);
-  return txt && /^\d+$/.test(txt.trim()) ? txt.trim() : null;
-}
-
 const app = express();
 app.use(express.json());
-
 app.use(cors({
   origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
