@@ -3,8 +3,8 @@ require('dotenv').config(); // Load .env variables
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const cors = require('cors');
 const P = require('pino');
+const cors = require('cors');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -34,7 +34,16 @@ function generateUsername() {
 }
 
 async function startUserSession(username) {
-  if (USERS[username]?.sock?.user) return USERS[username];
+  // ❌ End any existing session
+  for (const existing in USERS) {
+    try {
+      USERS[existing].sock.end();
+      delete USERS[existing];
+      console.log(`[server] Ended previous session: ${existing}`);
+    } catch (err) {
+      console.error(`[server] Failed to end session ${existing}`, err);
+    }
+  }
 
   const base = userBase(username);
   ensureDir(base);
@@ -62,9 +71,7 @@ async function startUserSession(username) {
   };
 
   sock.ev.process(async (events) => {
-    if (events['creds.update']) {
-      await saveCreds();
-    }
+    if (events['creds.update']) await saveCreds();
 
     if (events['connection.update']) {
       const { connection, lastDisconnect, qr } = events['connection.update'];
