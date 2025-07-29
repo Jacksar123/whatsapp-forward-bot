@@ -1,7 +1,5 @@
-// index.js
-// FULL UPDATED FILE
+// index.js — Final Version
 
-// All required modules
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
@@ -105,7 +103,7 @@ async function sendInBatches(sock, username, from, jids, messageContent) {
     }
 
     await sock.sendMessage(from, {
-      text: `Sent to:\n${names.map(n => `- ${n}`).join('\n')}\n\n${sent + batch.length < jids.length ? `Preparing to send more in ${BATCH_DELAY_MS / 1000}s…` : 'All done ✅'}`
+      text: `Sent to:\n${names.map(n => `- ${n}`).join('\n')}\n\n${sent + batch.length < jids.length ? `Waiting ${BATCH_DELAY_MS / 1000}s for next batch…` : '✅ Done'}`
     });
 
     sent += batch.length;
@@ -114,10 +112,7 @@ async function sendInBatches(sock, username, from, jids, messageContent) {
 }
 
 async function startUserSession(username) {
-  if (USERS[username]?.sock) {
-    console.log(`[${username}] Session already running`);
-    return USERS[username];
-  }
+  if (USERS[username]?.sock) return USERS[username];
 
   const base = userBase(username);
   ensureDir(base);
@@ -150,22 +145,19 @@ async function startUserSession(username) {
 
       if (connection === 'close') {
         const reason = lastDisconnect?.error?.output?.statusCode;
-        const msg = lastDisconnect?.error?.message;
-        console.log(`[${username}] connection closed. Reason: ${reason || 'unknown'}, Message: ${msg || 'none'}`);
         const shouldReconnect = (reason !== DisconnectReason.loggedOut);
-        if (shouldReconnect) setTimeout(() => startUserSession(username), 2000);
-        else console.log(`[${username}] Logged out.`);
+        if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
+        else console.log(`[${username}] Session ended`);
       } else if (connection === 'open') {
-        console.log(`[${username}] connected`);
         await autoScanAndCategorise(sock, username);
-        await sock.sendMessage(sock.user.id, { text: '✅ WhatsApp connected!\n\nSend an image to start broadcasting.\n\nType /help for commands.' });
+        await sock.sendMessage(sock.user.id, { text: '✅ WhatsApp connected.\n\nSend an image to begin.\nType /help for commands.' });
       }
     }
 
     if (events['messages.upsert']) {
       for (const msg of events['messages.upsert'].messages) {
         if (msg.key.fromMe) continue;
-        try { await handleMessage(username, msg); } catch (err) { console.error(`[${username}] handleMessage error`, err); }
+        try { await handleMessage(username, msg); } catch (err) { console.error(`[${username}] Msg error`, err); }
       }
     }
   });
@@ -196,42 +188,51 @@ async function handleMessage(username, msg) {
 
   const body = getMessageText(m).trim();
 
-  // Command: /addcategory
-  if (body.startsWith('/addcategory ')) {
-    const newCat = body.slice(13).trim();
-    if (!newCat || newCat.includes(' ')) {
-      return await sock.sendMessage(from, { text: '❌ Invalid category name. Use a single word (no spaces).' });
-    }
-    if (DEFAULT_CATEGORIES.includes(newCat) || u.categories[newCat]) {
-      return await sock.sendMessage(from, { text: `❗ Category "${newCat}" already exists.` });
-    }
-    u.categories[newCat] = [];
-    writeJSON(path.join(userBase(username), 'categories.json'), u.categories);
-    return await sock.sendMessage(from, { text: `✅ New category "${newCat}" added.` });
-  }
-
-  // Command: /stop
   if (body === '/stop') {
-    if (!u.pendingImage) {
-      return await sock.sendMessage(from, { text: `ℹ️ There's no active broadcast session.` });
-    }
     u.pendingImage = null;
-    u.lastPromptChat = null;
     return await sock.sendMessage(from, { text: `🛑 Broadcast cancelled.` });
   }
 
-  // Handle number selection after image
-  const selection = extractNumericChoice(m);
-  if (selection && u.pendingImage && u.lastPromptChat === from) {
+  if (body === '/help') {
+    return await sock.sendMessage(from, {
+      text: `Commands:
+/help - Show this help
+/rescan - Re-scan your WhatsApp groups
+/cats - View group categories
+/addcategory [Name] - Add new category
+/stop - Cancel current image broadcast`
+    });
+  }
+
+  if (body === '/rescan') {
+    await autoScanAndCategorise(sock, username);
+    return await sock.sendMessage(from, { text: '✅ Groups rescanned.' });
+  }
+
+  if (body === '/cats') {
+    const { text } = buildCategoryPrompt(username);
+    return await sock.sendMessage(from, { text });
+  }
+
+  if (body.startsWith('/addcategory ')) {
+    const name = body.slice(13).trim();
+    if (!name || name.includes(' ')) return await sock.sendMessage(from, { text: '❌ Invalid name (no spaces).' });
+    if (u.categories[name]) return await sock.sendMessage(from, { text: '❗ Already exists.' });
+    u.categories[name] = [];
+    writeJSON(path.join(userBase(username), 'categories.json'), u.categories);
+    return await sock.sendMessage(from, { text: `✅ Category "${name}" added.` });
+  }
+
+  const num = extractNumericChoice(m);
+  if (num && u.pendingImage && u.lastPromptChat === from) {
     const { mapping } = buildCategoryPrompt(username);
-    const number = parseInt(selection, 10);
-    const chosen = mapping[number];
+    const picked = mapping[parseInt(num, 10)];
+    if (!picked) return await sock.sendMessage(from, { text: '❌ Invalid choice.' });
 
-    if (!chosen) return await sock.sendMessage(from, { text: 'Invalid choice. Try again.' });
-    const jids = chosen === '__ALL__' ? Object.keys(u.allGroups) : (u.categories[chosen] || []);
-    if (!jids.length) return await sock.sendMessage(from, { text: 'No groups in that category.' });
+    const jids = picked === '__ALL__' ? Object.keys(u.allGroups) : u.categories[picked];
+    if (!jids.length) return await sock.sendMessage(from, { text: 'No groups to send to.' });
 
-    await sock.sendMessage(from, { text: `Broadcasting to ${jids.length} group${jids.length > 1 ? 's' : ''}…` });
+    await sock.sendMessage(from, { text: `📤 Sending to ${jids.length} group(s)…` });
     await sendInBatches(sock, username, from, jids, {
       image: u.pendingImage.buffer,
       caption: u.pendingImage.caption || ''
@@ -242,74 +243,44 @@ async function handleMessage(username, msg) {
     return;
   }
 
-  // Handle image upload
   if (m.imageMessage) {
     const buffer = await downloadMediaMessage(msg, 'buffer', {});
     const caption = m.imageMessage.caption || '';
     u.pendingImage = { buffer, caption };
-    const { text } = buildCategoryPrompt(username);
     u.lastPromptChat = from;
-    await sock.sendMessage(from, { text });
-    return;
-  }
-
-  if (body === '/rescan' || body === '/syncgroups') {
-    await autoScanAndCategorise(sock, username);
-    return await sock.sendMessage(from, { text: '✅ Rescanned and categorised groups.' });
-  }
-
-  if (body === '/cats') {
     const { text } = buildCategoryPrompt(username);
     return await sock.sendMessage(from, { text });
   }
-
-  if (body === '/help') {
-    return await sock.sendMessage(from, {
-      text: `Commands:
-/help - Show help
-/rescan or /syncgroups - Rescan your groups
-/cats - Show category prompt
-/addcategory [Name] - Add a new category
-/addgroup [Group Name] [Category] - Add group to a category
-/removegroup [Group Name] - Remove group from all categories
-/stop - Cancel an image broadcast in progress`
-    });
-  }
 }
 
+// EXPRESS API
 const app = express();
 app.use(express.json());
 app.use(cors({
   origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
-app.options('*', cors());
 
 app.post('/create-user', async (req, res) => {
   try {
     let { username } = req.body || {};
     if (!username) {
       username = generateUsername();
-      console.log(`[server] Auto-generated username: ${username}`);
+      console.log(`[server] New user: ${username}`);
     }
     await startUserSession(username);
     res.json({ ok: true, username });
-  } catch (e) {
-    console.error('create-user error', e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error('/create-user failed', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/get-qr', (req, res) => {
   const { username } = req.query;
-  if (!username) return res.status(400).json({ error: 'username required' });
   const u = USERS[username];
-  if (!u) return res.status(404).json({ error: 'User not found or not started yet' });
+  if (!u) return res.status(404).json({ error: 'User not found' });
   res.json({ qr: u.qr });
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Bot server running on port ${PORT}`));

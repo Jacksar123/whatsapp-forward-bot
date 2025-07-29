@@ -1,206 +1,208 @@
-const fs = require("fs-extra");
-const { downloadMediaMessage } = require("@whiskeysockets/baileys");
+const fs = require('fs');
+const path = require('path');
+const { downloadMediaMessage, jidNormalizedUser } = require('@whiskeysockets/baileys');
 
-let pendingMedia = {};
-let stopRequests = {};
+const BATCH_SIZE = 5;
+const BATCH_DELAY_MS = 5000;
+const DEFAULT_CATEGORIES = ['Shoes', 'Tech', 'Clothing'];
+const CATEGORY_KEYWORDS = {
+  Shoes: ['shoe', 'sneaker', 'crep', 'yeezy', 'jordan', 'footwear', 'nike', 'adidas', 'sb', 'dunk'],
+  Tech: ['tech', 'dev', 'coding', 'engineer', 'ai', 'crypto', 'blockchain', 'startup', 'hack', 'js', 'python'],
+  Clothing: ['clothing', 'threads', 'garms', 'fashion', 'streetwear', 'hoodie', 'tees', 'fit', 'wear']
+};
 
-function listenForMedia(sock, userId) {
-  const userPath = `users/${userId}`;
-  const allGroupsPath = `${userPath}/all_groups.json`;
-  const categoriesPath = `${userPath}/categories.json`;
-  const messageLogsPath = `${userPath}/message_logs.json`;
-
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg) return;
-
-    const sender = msg.key.remoteJid;
-    const isFromMe = msg.key.fromMe;
-    const messageType = Object.keys(msg.message || {})[0];
-    const text = msg.message?.conversation?.trim();
-
-    if (sender.split("@")[0] !== process.env.MY_NUMBER) return;
-
-    const allGroups = fs.readJsonSync(allGroupsPath);
-    const categories = fs.readJsonSync(categoriesPath);
-    const messageLogs = fs.readJsonSync(messageLogsPath);
-
-    // /stop broadcast
-    if (text?.startsWith("/stop")) {
-      stopRequests[sender] = true;
-      await sock.sendMessage(sender, { text: "🛑 Broadcast manually stopped." });
-      return;
-    }
-
-    // /addgroup
-    if (text?.startsWith("/addgroup")) {
-      const parts = text.split(" ");
-      if (parts.length < 3) {
-        await sock.sendMessage(sender, { text: "❌ Usage: /addgroup [Group Name] [Category]" });
-        return;
-      }
-      const groupName = parts.slice(1, -1).join(" ");
-      const categoryName = parts.slice(-1)[0];
-
-      const groupObj = allGroups.find(g => g.name.toLowerCase() === groupName.toLowerCase());
-      if (!groupObj) {
-        await sock.sendMessage(sender, { text: `❌ Group "${groupName}" not found.` });
-        return;
-      }
-
-      const catKey = Object.entries(categories).find(([k, v]) => v.name.toLowerCase() === categoryName.toLowerCase());
-      if (!catKey) {
-        await sock.sendMessage(sender, { text: `❌ Category "${categoryName}" not found.` });
-        return;
-      }
-
-      const [catId, catObj] = catKey;
-      if (!catObj.groups.some(g => g.id === groupObj.id)) {
-        catObj.groups.push(groupObj);
-        fs.writeJsonSync(categoriesPath, categories, { spaces: 2 });
-      }
-
-      await sock.sendMessage(sender, { text: `✅ Added "${groupObj.name}" to category "${catObj.name}"` });
-      return;
-    }
-
-    // /removegroup
-    if (text?.startsWith("/removegroup")) {
-      const groupName = text.slice(13).trim();
-      const groupObj = allGroups.find(g => g.name.toLowerCase() === groupName.toLowerCase());
-      if (!groupObj) {
-        await sock.sendMessage(sender, { text: `❌ Group "${groupName}" not found.` });
-        return;
-      }
-
-      let removed = false;
-      for (const cat of Object.values(categories)) {
-        const initial = cat.groups.length;
-        cat.groups = cat.groups.filter(g => g.id !== groupObj.id);
-        if (cat.groups.length !== initial) removed = true;
-      }
-
-      if (removed) {
-        fs.writeJsonSync(categoriesPath, categories, { spaces: 2 });
-        await sock.sendMessage(sender, { text: `🗑️ Removed "${groupObj.name}" from all categories.` });
-      } else {
-        await sock.sendMessage(sender, { text: `⚠️ "${groupObj.name}" was not in any category.` });
-      }
-      return;
-    }
-
-    // /listgroups
-    if (text?.startsWith("/listgroups")) {
-      let out = "📂 Categories and Groups:\n";
-      for (const [k, cat] of Object.entries(categories)) {
-        out += `\n${k}. ${cat.name} (${cat.groups.length} groups)\n`;
-        cat.groups.forEach(g => out += `   • ${g.name}\n`);
-      }
-      await sock.sendMessage(sender, { text: out });
-      return;
-    }
-
-    // /syncgroups
-    if (text?.startsWith("/syncgroups")) {
-      await sock.sendMessage(sender, { text: "🔄 Resyncing group list..." });
-      const chats = await sock.groupFetchAllParticipating();
-      const updated = Object.entries(chats).map(([jid, group]) => ({
-        id: jid,
-        name: group.subject
-      }));
-      fs.writeJsonSync(allGroupsPath, updated, { spaces: 2 });
-      await sock.sendMessage(sender, { text: `✅ Synced ${updated.length} groups.` });
-      return;
-    }
-
-    // Category selection: 1 / 2 / 3 / 4
-    if (["1", "2", "3", "4"].includes(text)) {
-      const pending = pendingMedia[sender];
-      if (!pending || !pending.msg.message?.imageMessage) {
-        await sock.sendMessage(sender, { text: "⚠️ No pending image to broadcast." });
-        return;
-      }
-
-      await sock.sendMessage(sender, { text: "📤 Preparing to send your message..." });
-
-      const buffer = await downloadMediaMessage(pending.msg, "buffer", {});
-      const originalCaption = pending.msg.message.imageMessage.caption || "";
-
-      const targetGroups =
-        text === "4"
-          ? allGroups
-          : categories[text]?.groups || [];
-
-      for (let i = 0; i < targetGroups.length; i += 5) {
-        if (stopRequests[sender]) {
-          await sock.sendMessage(sender, { text: "🛑 Broadcast stopped midway by user." });
-          stopRequests[sender] = false;
-          delete pendingMedia[sender];
-          return;
-        }
-
-        const batch = targetGroups.slice(i, i + 5);
-
-        for (const g of batch) {
-          await sock.sendMessage(g.id, {
-            image: buffer,
-            caption: originalCaption
-          });
-          console.log(`✅ Sent to ${g.name}`);
-        }
-
-        await sock.sendMessage(sender, {
-          text: `✅ Sent to:\n${batch.map(g => `• ${g.name}`).join("\n")}`,
-        });
-
-        if (i + 5 < targetGroups.length) {
-          await sock.sendMessage(sender, { text: "⏳ Waiting 5 seconds before next batch..." });
-          await new Promise(r => setTimeout(r, 5000));
-        }
-      }
-
-      await sock.sendMessage(sender, {
-        text: `🎉 Image sent to all ${targetGroups.length} groups${text === "4" ? "" : ` in '${categories[text].name}'`}`
-      });
-
-      messageLogs.push({
-        time: new Date().toISOString(),
-        category: text === "4" ? "All Groups" : categories[text].name,
-        groups: targetGroups,
-      });
-
-      fs.writeJsonSync(messageLogsPath, messageLogs, { spaces: 2 });
-      delete pendingMedia[sender];
-      return;
-    }
-
-    // Handle incoming image
-    if ((messageType === "imageMessage" || messageType === "extendedTextMessage") && isFromMe) {
-      try {
-        const image = msg.message?.imageMessage;
-        if (!image) return;
-
-        pendingMedia[sender] = {
-          msg: JSON.parse(JSON.stringify(msg)),
-          mediaType: "imageMessage",
-        };
-
-        let prompt = "📂 Yo you're live. Pick a number to blast that pic:\n";
-        for (const [key, cat] of Object.entries(categories)) {
-          prompt += `${key}. ${cat.name} (${cat.groups.length} groups)\n`;
-          cat.groups.forEach(g => prompt += `   • ${g.name}\n`);
-        }
-        prompt += `\n4. 🧨 *Send to EVERY group (${allGroups.length})*`;
-
-        await sock.sendMessage(sender, { text: prompt });
-        return;
-      } catch (err) {
-        console.error("❌ Error processing image for category:", err);
-        await sock.sendMessage(sender, { text: "❌ Couldn't prep your category list. Try again." });
-      }
-    }
-  });
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+function writeJSON(file, data) {
+  ensureDir(path.dirname(file));
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+function readJSON(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file));
+  } catch {
+    return fallback;
+  }
+}
+function normaliseJid(jid) {
+  return jidNormalizedUser(jid);
+}
+function categoriseGroupName(name) {
+  const n = name.toLowerCase();
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (kws.some(k => n.includes(k))) return cat;
+  }
+  return null;
 }
 
-module.exports = { listenForMedia };
+async function autoScanAndCategorise(sock, username, USERS) {
+  const metaMap = await sock.groupFetchAllParticipating();
+  const groups = Object.values(metaMap || {});
+  const base = path.join(__dirname, 'users', username);
+  const groupsPath = path.join(base, 'all_groups.json');
+  const catPath = path.join(base, 'categories.json');
 
+  const allGroups = {};
+  const categories = DEFAULT_CATEGORIES.reduce((acc, c) => ({ ...acc, [c]: [] }), {});
+
+  for (const g of groups) {
+    const name = g.subject || g.name || g.id;
+    const jid = g.id;
+    allGroups[jid] = { id: jid, name };
+    const guess = categoriseGroupName(name);
+    if (guess && categories[guess]) categories[guess].push(jid);
+  }
+
+  writeJSON(groupsPath, allGroups);
+  writeJSON(catPath, categories);
+  USERS[username].allGroups = allGroups;
+  USERS[username].categories = categories;
+  console.log(`[${username}] Auto-scan complete. Groups: ${groups.length}`);
+}
+
+function buildCategoryPrompt(username, USERS) {
+  const { categories, allGroups } = USERS[username];
+  const lines = [];
+  let idx = 1;
+  const mapping = {};
+
+  for (const cat of Object.keys(categories)) {
+    const jids = categories[cat] || [];
+    const names = jids.map(j => allGroups[j]?.name || j);
+    mapping[idx] = cat;
+    lines.push(`*${idx}. ${cat}* (${jids.length} groups)`);
+    if (names.length) lines.push('  - ' + names.join('\n  - '));
+    idx++;
+  }
+
+  lines.push(`*${idx}. Send to ALL*`);
+  mapping[idx] = '__ALL__';
+
+  return {
+    text: `Choose a category to broadcast to:\n\n${lines.join('\n')}\n\nReply with the number (e.g., 1, 2, 3, or ${idx}).`,
+    mapping
+  };
+}
+
+async function sendInBatches(sock, username, from, jids, messageContent, USERS) {
+  const total = jids.length;
+  let sent = 0;
+
+  while (sent < total) {
+    const batch = jids.slice(sent, sent + BATCH_SIZE);
+    const groupNames = batch.map(jid => USERS[username].allGroups[jid]?.name || jid);
+
+    for (const jid of batch) {
+      try {
+        await sock.sendMessage(jid, messageContent);
+        console.log(`[${username}] Sent to ${jid}`);
+      } catch (error) {
+        console.error(`[${username}] Failed to send to ${jid}:`, error.message || error);
+      }
+    }
+
+    try {
+      await sock.sendMessage(from, {
+        text: `✅ Sent to:\n${groupNames.map(name => `- ${name}`).join('\n')}\n\n${sent + batch.length < total ? `⏳ Next batch in ${BATCH_DELAY_MS / 1000}s…` : '🎉 All messages sent!'}`,
+      });
+    } catch (notifyErr) {
+      console.error(`[${username}] Failed to notify sender`, notifyErr.message || notifyErr);
+    }
+
+    sent += batch.length;
+    if (sent < total) await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+  }
+}
+
+function getMessageText(m) {
+  if (!m) return '';
+  if (m.conversation) return m.conversation;
+  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+  if (m.imageMessage?.caption) return m.imageMessage.caption;
+  if (m.videoMessage?.caption) return m.videoMessage.caption;
+  return '';
+}
+
+function extractNumericChoice(m) {
+  const txt = getMessageText(m);
+  return txt && /^\d+$/.test(txt.trim()) ? txt.trim() : null;
+}
+
+async function handleBroadcastMessage(username, msg, USERS) {
+  const u = USERS[username];
+  const sock = u.sock;
+  const m = msg.message;
+  const from = normaliseJid(msg.key.remoteJid);
+  if (from.endsWith('@g.us') || !m) return;
+
+  const body = getMessageText(m).trim();
+
+  if (body === '/rescan' || body === '/syncgroups') {
+    await autoScanAndCategorise(sock, username, USERS);
+    return await sock.sendMessage(from, { text: '✅ Rescanned and categorised groups.' });
+  }
+
+  if (body === '/cats') {
+    const { text } = buildCategoryPrompt(username, USERS);
+    return await sock.sendMessage(from, { text });
+  }
+
+  if (body === '/stop') {
+    if (!u.pendingImage) {
+      return await sock.sendMessage(from, { text: `ℹ️ There's no active broadcast session.` });
+    }
+    u.pendingImage = null;
+    u.lastPromptChat = null;
+    return await sock.sendMessage(from, { text: `🛑 Broadcast cancelled.` });
+  }
+
+  const selection = extractNumericChoice(m);
+  if (selection && u.pendingImage && u.lastPromptChat === from) {
+    const { mapping } = buildCategoryPrompt(username, USERS);
+    const number = parseInt(selection, 10);
+    const chosen = mapping[number];
+
+    if (!chosen) return await sock.sendMessage(from, { text: 'Invalid choice. Try again.' });
+    const jids = chosen === '__ALL__' ? Object.keys(u.allGroups) : (u.categories[chosen] || []);
+    if (!jids.length) return await sock.sendMessage(from, { text: 'No groups in that category.' });
+
+    await sock.sendMessage(from, { text: `Broadcasting to ${jids.length} group${jids.length > 1 ? 's' : ''}…` });
+    await sendInBatches(sock, username, from, jids, {
+      image: u.pendingImage.buffer,
+      caption: u.pendingImage.caption || ''
+    }, USERS);
+
+    u.pendingImage = null;
+    u.lastPromptChat = null;
+    return;
+  }
+
+  if (m.imageMessage) {
+    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+    const caption = m.imageMessage.caption || '';
+    u.pendingImage = { buffer, caption };
+    const { text } = buildCategoryPrompt(username, USERS);
+    u.lastPromptChat = from;
+    await sock.sendMessage(from, { text });
+    return;
+  }
+
+  if (body === '/help') {
+    return await sock.sendMessage(from, {
+      text: `Commands:
+/help - Show help
+/rescan or /syncgroups - Rescan your groups
+/cats - Show category prompt
+/stop - Cancel an image broadcast in progress`
+    });
+  }
+}
+
+module.exports = {
+  autoScanAndCategorise,
+  buildCategoryPrompt,
+  sendInBatches,
+  handleBroadcastMessage,
+  categoriseGroupName
+};
