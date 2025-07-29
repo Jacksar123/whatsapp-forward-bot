@@ -22,7 +22,6 @@ const CATEGORY_KEYWORDS = {
   Clothing: ['clothing', 'threads', 'garms', 'fashion', 'streetwear', 'hoodie', 'tees', 'fit', 'wear']
 };
 
-// Utility functions
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 function userBase(username) { return path.join(__dirname, 'users', username); }
 function readJSON(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
@@ -105,40 +104,61 @@ async function startUserSession(username) {
   };
 
   sock.ev.process(async (events) => {
-    if (events['creds.update']) await saveCreds();
+    if (events['creds.update']) {
+      console.log(`[${username}] 🔄 Credentials updated`);
+      await saveCreds();
+    }
 
     if (events['connection.update']) {
       const { connection, lastDisconnect, qr } = events['connection.update'];
-      if (qr) USERS[username].qr = qr;
+      if (qr) {
+        USERS[username].qr = qr;
+        console.log(`🟨 QR generated for ${username}`);
+      }
 
       if (connection === 'close') {
+        console.log(`❌ Connection closed for ${username}`);
         const status = lastDisconnect?.error?.output?.statusCode;
         const msg = lastDisconnect?.error?.message;
+        if (lastDisconnect?.error) {
+          console.error(`❌ Disconnect reason (${username}):`, lastDisconnect.error);
+        }
+
         if (status === 408 || (msg && msg.includes('QR refs attempts ended'))) {
+          console.log(`[${username}] QR expired, wiping session and restarting...`);
           await wipeAuth(username);
           setTimeout(() => startUserSession(username), 1000);
           return;
         }
         if (status !== DisconnectReason.loggedOut) {
+          console.log(`[${username}] Unexpected disconnect, restarting session...`);
           setTimeout(() => startUserSession(username), 2000);
         } else {
-          console.log(`[${username}] Logged out`);
+          console.log(`[${username}] Logged out manually`);
         }
       }
 
       if (connection === 'open') {
+        console.log(`✅ Connection opened for ${username}`);
         USERS[username].qr = null;
         await autoScanAndCategorise(sock, username);
+      } else {
+        console.log(`ℹ️ Connection update for ${username}:`, events['connection.update']);
       }
     }
 
     if (events['messages.upsert']) {
       for (const msg of events['messages.upsert'].messages) {
-        try { await handleMessage(username, msg); } catch (e) { console.error(`[${username}] msg error`, e); }
+        try {
+          await handleMessage(username, msg);
+        } catch (e) {
+          console.error(`[${username}] msg error`, e);
+        }
       }
     }
   });
 
+  console.log(`🟢 Baileys socket created for ${username}`);
   return USERS[username];
 }
 
@@ -249,7 +269,6 @@ async function handleMessage(username, msg) {
 const app = express();
 app.use(express.json());
 
-// ✅ Step 1: CORS middleware
 const corsOptions = {
   origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -258,8 +277,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// ✅ Step 2: Explicitly respond to OPTIONS preflight
 app.options('*', cors(corsOptions));
 
 app.post('/create-user', async (req, res) => {
