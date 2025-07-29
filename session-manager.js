@@ -21,6 +21,7 @@ function userFile(userId, f) {
 
 async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
   console.log(`\n🟡 [${userId}] Starting new session`);
+  console.log(`🚀 [${userId}] Starting fresh session`);
   await stopSession(userId, { deleteAuth: true });
   fs.ensureDirSync(userDir(userId));
   fs.ensureDirSync(userFile(userId, "auth"));
@@ -30,6 +31,7 @@ async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
 
   console.log(`🟢 [${userId}] Using Baileys version: ${version.join(".")}`);
   const sock = makeWASocket({ version, auth: state });
+  console.log(`🟢 [${userId}] Baileys socket started`);
   const qrPath = userFile(userId, "qr.png");
   const expiresAt = Date.now() + ttlMs;
 
