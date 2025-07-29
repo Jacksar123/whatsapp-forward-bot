@@ -1,3 +1,4 @@
+// index.js
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
@@ -55,9 +56,7 @@ async function autoScanAndCategorise(sock, username) {
     const jid = g.id;
     allGroups[jid] = { id: jid, name };
     const guess = categoriseGroupName(name);
-    if (guess && categories[guess]) {
-      categories[guess].push(jid);
-    }
+    if (guess && categories[guess]) categories[guess].push(jid);
   }
 
   writeJSON(groupsPath, allGroups);
@@ -98,7 +97,7 @@ async function sendInBatches(sock, username, from, jids, messageContent) {
     const names = batch.map(j => USERS[username].allGroups[j]?.name || j);
 
     for (const jid of batch) {
-      try { await sock.sendMessage(jid, messageContent); }
+      try { await sock.sendMessage(jid, messageContent); } 
       catch (e) { console.error(`[${username}] Failed sending to ${jid}`, e); }
     }
 
@@ -156,11 +155,13 @@ async function startUserSession(username) {
       } else if (connection === 'open') {
         console.log(`[${username}] connected`);
         await autoScanAndCategorise(sock, username);
+        await sock.sendMessage(sock.user.id, { text: '✅ WhatsApp connected! Send me an image and I’ll ask which group to forward it to.' });
       }
     }
 
     if (events['messages.upsert']) {
       for (const msg of events['messages.upsert'].messages) {
+        if (msg.key.fromMe) continue; // ignore messages from self
         try { await handleMessage(username, msg); } catch (err) { console.error(`[${username}] handleMessage error`, err); }
       }
     }
@@ -170,7 +171,9 @@ async function startUserSession(username) {
 }
 
 async function handleMessage(username, msg) {
-  console.log(`[${username}] Received message:`, JSON.stringify(msg, null, 2)); // ✅ DEBUG LOG
+  console.log(`[${username}] Received message from ${msg.key.remoteJid}, fromMe: ${msg.key.fromMe}`);
+  console.log(JSON.stringify(msg, null, 2));
+
   const u = USERS[username];
   const sock = u.sock;
   const m = msg.message;
