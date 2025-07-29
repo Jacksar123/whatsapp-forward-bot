@@ -2,15 +2,25 @@
 const fs = require("fs-extra");
 const path = require("path");
 const QRCode = require("qrcode");
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require("@whiskeysockets/baileys");
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason
+} = require("@whiskeysockets/baileys");
 
 const sessions = new Map(); // userId => { sock, qrPath, timer, status, expiresAt }
 
-function userDir(userId) { return path.join(__dirname, "users", userId); }
-function userFile(userId, f) { return path.join(userDir(userId), f); }
+function userDir(userId) {
+  return path.join(__dirname, "users", userId);
+}
+
+function userFile(userId, f) {
+  return path.join(userDir(userId), f);
+}
 
 async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
-  await stopSession(userId, { deleteAuth: true }); // kill existing session
+  await stopSession(userId, { deleteAuth: true }); // Kill old session if exists
   fs.ensureDirSync(userDir(userId));
   fs.ensureDirSync(userFile(userId, "auth"));
 
@@ -40,14 +50,22 @@ async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
 
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
+      const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] || "Unknown";
+      console.log(`❌ [${userId}] Disconnected: ${reason} (${code})`);
+
       const shouldReconnect = code !== DisconnectReason.loggedOut;
-      if (!shouldReconnect) await stopSession(userId, { deleteAuth: true });
-      else await startFreshSession(userId, { ttlMs });
+      if (!shouldReconnect) {
+        await stopSession(userId, { deleteAuth: true });
+      } else {
+        console.log(`🔁 [${userId}] Reconnecting...`);
+        await startFreshSession(userId, { ttlMs });
+      }
     }
   });
 
   sock.ev.on("creds.update", saveCreds);
 
+  // Set timeout to auto-kill expired QR sessions
   info.timer = setTimeout(async () => {
     if (info.status === "pending_qr") {
       console.log(`⌛ [${userId}] QR expired, killing session`);
@@ -61,11 +79,13 @@ async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
 async function stopSession(userId, { deleteAuth = false } = {}) {
   const info = sessions.get(userId);
   if (!info) return;
-  try { info.sock.end(); } catch (_) {}
+  try {
+    info.sock.end();
+  } catch (_) {}
   clearTimeout(info.timer);
   sessions.delete(userId);
   if (deleteAuth) fs.removeSync(userFile(userId, "auth"));
-  console.log(`🛑 [${userId}] session stopped${deleteAuth ? " & auth deleted" : ""}`);
+  console.log(`🛑 [${userId}] Session stopped${deleteAuth ? " & auth deleted" : ""}`);
 }
 
 function getSessionStatus(userId) {
