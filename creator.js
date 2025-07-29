@@ -265,7 +265,6 @@ async function handleMessage(username, msg) {
   }
 }
 
-// ------------------- EXPRESS + CORS -------------------
 const app = express();
 app.use(express.json());
 
@@ -297,6 +296,13 @@ app.post('/create-user', async (req, res) => {
 app.get('/get-qr', (req, res) => {
   const { username } = req.query;
   if (!username) return res.status(400).json({ error: 'username required' });
+  const u = USERS[username];
+  if (!u) return res.status(404).json({ error: 'user not found' });
+  res.json({ qr: u.qr });
+});
+
+app.get('/get-qr/:username', (req, res) => {
+  const { username } = req.params;
   const u = USERS[username];
   if (!u) return res.status(404).json({ error: 'user not found' });
   res.json({ qr: u.qr });
