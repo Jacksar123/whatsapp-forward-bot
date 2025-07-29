@@ -1,4 +1,4 @@
-// index.js — Final Version
+// index.js — Fully Fixed Version
 
 const fs = require('fs');
 const path = require('path');
@@ -195,12 +195,7 @@ async function handleMessage(username, msg) {
 
   if (body === '/help') {
     return await sock.sendMessage(from, {
-      text: `Commands:
-/help - Show this help
-/rescan - Re-scan your WhatsApp groups
-/cats - View group categories
-/addcategory [Name] - Add new category
-/stop - Cancel current image broadcast`
+      text: `Commands:\n/help - Show this help\n/rescan - Re-scan your WhatsApp groups\n/cats - View group categories\n/addcategory [Name] - Add new category\n/stop - Cancel current image broadcast`
     });
   }
 
@@ -256,10 +251,14 @@ async function handleMessage(username, msg) {
 // EXPRESS API
 const app = express();
 app.use(express.json());
-app.use(cors({
-  origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
-  credentials: true
-}));
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://whats-broadcast-hub.lovable.app");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 app.post('/create-user', async (req, res) => {
   try {
@@ -276,8 +275,9 @@ app.post('/create-user', async (req, res) => {
   }
 });
 
-app.get('/get-qr', (req, res) => {
-  const { username } = req.query;
+// ✅ FIXED: This now uses req.params instead of req.query
+app.get('/get-qr/:username', (req, res) => {
+  const { username } = req.params;
   const u = USERS[username];
   if (!u) return res.status(404).json({ error: 'User not found' });
   res.json({ qr: u.qr });
