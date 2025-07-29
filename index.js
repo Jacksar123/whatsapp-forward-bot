@@ -275,7 +275,6 @@ app.post('/create-user', async (req, res) => {
   }
 });
 
-// ✅ FIXED: This now uses req.params instead of req.query
 app.get('/get-qr/:username', (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
