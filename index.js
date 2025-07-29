@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const P = require('pino');
 const express = require('express');
-const cors = require('cors');
 
 const {
   default: makeWASocket,
@@ -238,18 +237,20 @@ function extractNumericChoice(m) {
   return txt && /^\d+$/.test(txt.trim()) ? txt.trim() : null;
 }
 
+// -------------------------------------------
+// ✅ EXPRESS SERVER + MANUAL CORS
+// -------------------------------------------
 const app = express();
 app.use(express.json());
 
-// ✅ Full CORS support
-app.use(cors({
-  origin: ['https://whats-broadcast-hub.lovable.app', 'http://localhost:3000'],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
-
-app.options('*', cors());
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', 'https://whats-broadcast-hub.lovable.app');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 app.post('/create-user', async (req, res) => {
   try {
