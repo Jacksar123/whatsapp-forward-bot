@@ -20,13 +20,15 @@ function userFile(userId, f) {
 }
 
 async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
-  await stopSession(userId, { deleteAuth: true }); // Kill old session if exists
+  console.log(`\n🟡 [${userId}] Starting new session`);
+  await stopSession(userId, { deleteAuth: true });
   fs.ensureDirSync(userDir(userId));
   fs.ensureDirSync(userFile(userId, "auth"));
 
   const { state, saveCreds } = await useMultiFileAuthState(userFile(userId, "auth"));
   const { version } = await fetchLatestBaileysVersion();
 
+  console.log(`🟢 [${userId}] Using Baileys version: ${version.join(".")}`);
   const sock = makeWASocket({ version, auth: state });
   const qrPath = userFile(userId, "qr.png");
   const expiresAt = Date.now() + ttlMs;
@@ -36,28 +38,30 @@ async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
 
   sock.ev.on("connection.update", async (u) => {
     const { connection, lastDisconnect, qr } = u;
+    console.log(`📶 [${userId}] connection.update: ${connection}`);
 
     if (qr && info.status === "pending_qr") {
       await QRCode.toFile(qrPath, qr);
-      console.log(`✅ [${userId}] QR saved to ${qrPath}`);
+      console.log(`✅ [${userId}] QR code saved: ${qrPath}`);
     }
 
     if (connection === "open") {
       info.status = "active";
       clearTimeout(info.timer);
-      console.log(`✅ [${userId}] Connected`);
+      console.log(`✅ [${userId}] WhatsApp linked successfully.`);
     }
 
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
       const reason = Object.entries(DisconnectReason).find(([, v]) => v === code)?.[0] || "Unknown";
-      console.log(`❌ [${userId}] Disconnected: ${reason} (${code})`);
+      console.log(`❌ [${userId}] Disconnected - Reason: ${reason} (Code ${code})`);
 
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       if (!shouldReconnect) {
+        console.log(`🧹 [${userId}] Session ended. Cleaning up.`);
         await stopSession(userId, { deleteAuth: true });
       } else {
-        console.log(`🔁 [${userId}] Reconnecting...`);
+        console.log(`🔁 [${userId}] Reconnecting socket...`);
         await startFreshSession(userId, { ttlMs });
       }
     }
@@ -65,27 +69,37 @@ async function startFreshSession(userId, { ttlMs = 5 * 60 * 1000 } = {}) {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // Set timeout to auto-kill expired QR sessions
+  // Auto-expire QR
   info.timer = setTimeout(async () => {
     if (info.status === "pending_qr") {
-      console.log(`⌛ [${userId}] QR expired, killing session`);
+      console.log(`⌛ [${userId}] QR expired. Session terminated.`);
       await stopSession(userId, { deleteAuth: true });
     }
   }, ttlMs);
 
+  console.log(`📆 [${userId}] QR valid until: ${new Date(expiresAt).toLocaleTimeString()}`);
   return { qrPath, expiresAt };
 }
 
 async function stopSession(userId, { deleteAuth = false } = {}) {
   const info = sessions.get(userId);
   if (!info) return;
+
   try {
     info.sock.end();
-  } catch (_) {}
+  } catch (e) {
+    console.log(`⚠️ [${userId}] Error closing socket:`, e.message);
+  }
+
   clearTimeout(info.timer);
   sessions.delete(userId);
-  if (deleteAuth) fs.removeSync(userFile(userId, "auth"));
-  console.log(`🛑 [${userId}] Session stopped${deleteAuth ? " & auth deleted" : ""}`);
+
+  if (deleteAuth) {
+    fs.removeSync(userFile(userId, "auth"));
+    console.log(`🗑️ [${userId}] Auth files deleted`);
+  }
+
+  console.log(`🛑 [${userId}] Session fully stopped`);
 }
 
 function getSessionStatus(userId) {
