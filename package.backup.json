@@ -1,14 +1,14 @@
 {
   "name": "multi-user-whatsapp-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "creator.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node creator.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Multi-user WhatsApp broadcast bot using Baileys",
+  "description": "",
   "engines": {
     "node": "20.x"
   },
@@ -18,6 +18,9 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "fs-extra": "^11.3.0",
-    "qrcode": "^1.5.4"
+    "qr-image": "^3.2.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
   }
 }
+
