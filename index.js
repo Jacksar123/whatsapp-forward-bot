@@ -41,7 +41,9 @@ function endUserSession(username) {
   u.ended = true;
 
   try {
-    u.sock.end();
+    if (u.sock?.ws?._socket?.readable) {
+      u.sock.end();
+    }
   } catch (err) {
     console.warn(`[server] Error while ending session for ${username}:`, err.message);
   }
@@ -80,7 +82,8 @@ async function startUserSession(username) {
     allGroups: {},
     pendingImage: null,
     lastPromptChat: null,
-    ended: false
+    ended: false,
+    restarting: false
   };
 
   sock.ev.process(async (events) => {
@@ -93,9 +96,19 @@ async function startUserSession(username) {
       if (connection === 'close') {
         const code = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = (code !== DisconnectReason.loggedOut);
-        if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
-        else console.log(`[${username}] Session ended`);
+
+        if (shouldReconnect && !USERS[username].restarting) {
+          USERS[username].restarting = true;
+          console.log(`[${username}] Attempting reconnect...`);
+          setTimeout(() => {
+            endUserSession(username); // cleanly end first
+            startUserSession(username); // restart
+          }, 3000);
+        } else {
+          console.log(`[${username}] Session ended permanently`);
+        }
       } else if (connection === 'open') {
+        USERS[username].restarting = false;
         await autoScanAndCategorise(sock, username, USERS);
         await sock.sendMessage(sock.user.id, {
           text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
