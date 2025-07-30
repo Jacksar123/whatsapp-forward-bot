@@ -51,8 +51,38 @@ function endUserSession(username) {
   delete USERS[username];
 }
 
+function bindEventListeners(sock, username) {
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const msg of messages) {
+      try {
+        await handleBroadcastMessage(username, msg, USERS);
+      } catch (err) {
+        console.error(`[${username}] Error handling msg:`, err);
+      }
+    }
+  });
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) USERS[username].qr = qr;
+
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.warn(`[${username}] Connection closed (code: ${code}). Reconnect: ${shouldReconnect}`);
+      if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
+    } else if (connection === 'open') {
+      console.log(`[${username}] WhatsApp connected.`);
+      await autoScanAndCategorise(sock, username, USERS);
+      sock.sendMessage(sock.user.id, {
+        text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
+      });
+    }
+  });
+
+  console.log(`[${username}] ✅ Bound event listeners.`);
+}
+
 async function startUserSession(username) {
-  // ✅ End all OTHER sessions (but not the one we're creating)
   for (const existing in USERS) {
     if (existing !== username) {
       endUserSession(existing);
@@ -86,46 +116,8 @@ async function startUserSession(username) {
     restarting: false
   };
 
-  sock.ev.process(async (events) => {
-    if (events['creds.update']) await saveCreds();
-
-    if (events['connection.update']) {
-      const { connection, lastDisconnect, qr } = events['connection.update'];
-      if (qr) USERS[username].qr = qr;
-
-      if (connection === 'close') {
-        const code = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = (code !== DisconnectReason.loggedOut);
-
-        if (shouldReconnect && !USERS[username].restarting) {
-          USERS[username].restarting = true;
-          console.log(`[${username}] Attempting reconnect...`);
-          setTimeout(() => {
-            endUserSession(username); // cleanly end first
-            startUserSession(username); // restart
-          }, 3000);
-        } else {
-          console.log(`[${username}] Session ended permanently`);
-        }
-      } else if (connection === 'open') {
-        USERS[username].restarting = false;
-        await autoScanAndCategorise(sock, username, USERS);
-        await sock.sendMessage(sock.user.id, {
-          text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
-        });
-      }
-    }
-
-    if (events['messages.upsert']) {
-      for (const msg of events['messages.upsert'].messages) {
-        try {
-          await handleBroadcastMessage(username, msg, USERS);
-        } catch (err) {
-          console.error(`[${username}] Error handling msg:`, err);
-        }
-      }
-    }
-  });
+  sock.ev.on('creds.update', saveCreds);
+  bindEventListeners(sock, username);
 
   return USERS[username];
 }
