@@ -50,9 +50,11 @@ function endUserSession(username) {
 }
 
 async function startUserSession(username) {
-  // ❌ Ensure only one session is active at a time
+  // ✅ End all OTHER sessions (but not the one we're creating)
   for (const existing in USERS) {
-    endUserSession(existing);
+    if (existing !== username) {
+      endUserSession(existing);
+    }
   }
 
   const base = userBase(username);
@@ -151,7 +153,7 @@ app.get('/get-qr/:username', (req, res) => {
   res.json({ qr: u.qr });
 });
 
-// HEALTH CHECK (for Render, Railway, uptime monitors)
+// HEALTH CHECK
 app.get('/health', (_, res) => res.send('OK'));
 
 // LAUNCH
