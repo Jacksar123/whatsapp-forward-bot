@@ -33,16 +33,26 @@ function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
 }
 
+function endUserSession(username) {
+  const u = USERS[username];
+  if (!u || !u.sock || u.ended) return;
+
+  console.log(`[server] Ending session: ${username}`);
+  u.ended = true;
+
+  try {
+    u.sock.end();
+  } catch (err) {
+    console.warn(`[server] Error while ending session for ${username}:`, err.message);
+  }
+
+  delete USERS[username];
+}
+
 async function startUserSession(username) {
-  // ❌ End any existing session
+  // ❌ Ensure only one session is active at a time
   for (const existing in USERS) {
-    try {
-      USERS[existing].sock.end();
-      delete USERS[existing];
-      console.log(`[server] Ended previous session: ${existing}`);
-    } catch (err) {
-      console.error(`[server] Failed to end session ${existing}`, err);
-    }
+    endUserSession(existing);
   }
 
   const base = userBase(username);
@@ -67,7 +77,8 @@ async function startUserSession(username) {
     categories: {},
     allGroups: {},
     pendingImage: null,
-    lastPromptChat: null
+    lastPromptChat: null,
+    ended: false
   };
 
   sock.ev.process(async (events) => {
