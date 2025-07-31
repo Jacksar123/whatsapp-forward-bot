@@ -1,4 +1,4 @@
-require('dotenv').config(); // Load .env variables
+require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
@@ -63,6 +63,7 @@ function bindEventListeners(sock, username) {
   });
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (!USERS[username]) USERS[username] = {};
     if (qr) USERS[username].qr = qr;
 
     if (connection === 'close') {
@@ -126,12 +127,14 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
-// ✅ FIXED CORS
-app.use(cors({
-  origin: 'https://whats-broadcast-hub.lovable.app',
-  methods: ['GET', 'POST'],
-  credentials: true
-}));
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://whats-broadcast-hub.lovable.app");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
