@@ -126,14 +126,12 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "https://whats-broadcast-hub.lovable.app");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.header("Access-Control-Allow-Credentials", "true");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
+// ✅ FIXED CORS
+app.use(cors({
+  origin: 'https://whats-broadcast-hub.lovable.app',
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
