@@ -156,9 +156,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Routers
+// ✅ Modular Routes
 app.use('/quick-actions', require('./routes/quick-actions')(USERS));
 app.use('/get-categories', require('./routes/get-categories')(USERS));
+app.use('/set-categories', require('./routes/set-categories')(USERS)); // << ✅ NEW route
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
@@ -181,20 +182,6 @@ app.get('/get-qr/:username', (req, res) => {
   const u = USERS[username];
   if (!u) return res.status(404).json({ error: 'User not found' });
   res.json({ qr: u.qr });
-});
-
-// ✅ NEW: Sync categories from frontend to bot memory
-app.post('/set-categories/:username', (req, res) => {
-  const { username } = req.params;
-  const { categories } = req.body;
-  if (!USERS[username]) return res.status(404).json({ error: 'User not found' });
-  if (!categories || typeof categories !== 'object') {
-    return res.status(400).json({ error: 'Invalid categories payload' });
-  }
-
-  USERS[username].categories = categories;
-  console.log(`[${username}] Categories updated from frontend`);
-  res.json({ ok: true });
 });
 
 // HEALTH CHECK
