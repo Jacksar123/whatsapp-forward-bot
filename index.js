@@ -78,7 +78,6 @@ function bindEventListeners(sock, username) {
 
       await autoScanAndCategorise(sock, username, USERS);
 
-      // ✅ Patch: Defer sending welcome message to avoid socket timing error
       setTimeout(async () => {
         try {
           await sock.sendMessage(sock.user.id, {
@@ -157,9 +156,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Inject USERS into quick-actions route
-const quickActionsRouter = require('./routes/quick-actions')(USERS);
-app.use('/quick-actions', quickActionsRouter);
+// ✅ Inject modular routers
+app.use('/quick-actions', require('./routes/quick-actions')(USERS));
+app.use('/get-categories', require('./routes/get-categories')(USERS));
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
