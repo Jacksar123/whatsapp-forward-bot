@@ -18,9 +18,6 @@ const {
   handleBroadcastMessage
 } = require('./lib/broadcast');
 
-// ✅ Import the Quick Actions route
-const quickActionsRouter = require('./routes/quick-actions');
-
 const PORT = process.env.PORT || 10000;
 const USERS = {};
 
@@ -81,14 +78,16 @@ function bindEventListeners(sock, username) {
 
       await autoScanAndCategorise(sock, username, USERS);
 
-      // ✅ Check if the socket is open before sending a message
-      if (sock?.ws?.readyState === 1) {
-        await sock.sendMessage(sock.user.id, {
-          text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
-        });
-      } else {
-        console.warn(`[${username}] Tried to send message but socket is not open.`);
-      }
+      // ✅ Patch: Defer sending welcome message to avoid socket timing error
+      setTimeout(async () => {
+        try {
+          await sock.sendMessage(sock.user.id, {
+            text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
+          });
+        } catch (err) {
+          console.warn(`[${username}] Failed to send welcome message:`, err.message);
+        }
+      }, 2000);
     }
   });
 
@@ -158,7 +157,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Mount the Quick Actions route
+// ✅ Inject USERS into quick-actions route
+const quickActionsRouter = require('./routes/quick-actions')(USERS);
 app.use('/quick-actions', quickActionsRouter);
 
 // ROUTES
