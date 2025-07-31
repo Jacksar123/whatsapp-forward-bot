@@ -18,6 +18,9 @@ const {
   handleBroadcastMessage
 } = require('./lib/broadcast');
 
+// ✅ NEW: Import the Quick Actions route
+const quickActionsRouter = require('./routes/quick-actions');
+
 const PORT = process.env.PORT || 10000;
 const USERS = {};
 
@@ -127,6 +130,7 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
+// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "https://whats-broadcast-hub.lovable.app");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -135,6 +139,9 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
+
+// ✅ Mount the Quick Actions route
+app.use('/quick-actions', quickActionsRouter);
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
