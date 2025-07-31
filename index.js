@@ -18,7 +18,7 @@ const {
   handleBroadcastMessage
 } = require('./lib/broadcast');
 
-// ✅ NEW: Import the Quick Actions route
+// ✅ Import the Quick Actions route
 const quickActionsRouter = require('./routes/quick-actions');
 
 const PORT = process.env.PORT || 10000;
@@ -73,13 +73,22 @@ function bindEventListeners(sock, username) {
       const code = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       console.warn(`[${username}] Connection closed (code: ${code}). Reconnect: ${shouldReconnect}`);
+      USERS[username].connected = false;
       if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
     } else if (connection === 'open') {
       console.log(`[${username}] WhatsApp connected.`);
+      USERS[username].connected = true;
+
       await autoScanAndCategorise(sock, username, USERS);
-      sock.sendMessage(sock.user.id, {
-        text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
-      });
+
+      // ✅ Check if the socket is open before sending a message
+      if (sock?.ws?.readyState === 1) {
+        await sock.sendMessage(sock.user.id, {
+          text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
+        });
+      } else {
+        console.warn(`[${username}] Tried to send message but socket is not open.`);
+      }
     }
   });
 
@@ -117,7 +126,8 @@ async function startUserSession(username) {
     pendingImage: null,
     lastPromptChat: null,
     ended: false,
-    restarting: false
+    restarting: false,
+    connected: false
   };
 
   sock.ev.on('creds.update', saveCreds);
@@ -140,7 +150,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Mount the Quick Actions route
+// Mount the Quick Actions route
 app.use('/quick-actions', quickActionsRouter);
 
 // ROUTES
