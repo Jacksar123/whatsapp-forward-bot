@@ -138,7 +138,7 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
-// ✅ Fixed: CORS for both preview + production
+// ✅ CORS for frontend preview and prod
 const allowedOrigins = [
   "https://whats-broadcast-hub.lovable.app",
   "https://preview--whats-broadcast-hub.lovable.app"
@@ -156,7 +156,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Inject modular routers
+// ✅ Routers
 app.use('/quick-actions', require('./routes/quick-actions')(USERS));
 app.use('/get-categories', require('./routes/get-categories')(USERS));
 
@@ -181,6 +181,20 @@ app.get('/get-qr/:username', (req, res) => {
   const u = USERS[username];
   if (!u) return res.status(404).json({ error: 'User not found' });
   res.json({ qr: u.qr });
+});
+
+// ✅ NEW: Sync categories from frontend to bot memory
+app.post('/set-categories/:username', (req, res) => {
+  const { username } = req.params;
+  const { categories } = req.body;
+  if (!USERS[username]) return res.status(404).json({ error: 'User not found' });
+  if (!categories || typeof categories !== 'object') {
+    return res.status(400).json({ error: 'Invalid categories payload' });
+  }
+
+  USERS[username].categories = categories;
+  console.log(`[${username}] Categories updated from frontend`);
+  res.json({ ok: true });
 });
 
 // HEALTH CHECK
