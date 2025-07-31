@@ -1,40 +1,7 @@
-// routes/quick-actions.js
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const router = express.Router();
-
-// POST /quick-actions/update-groups
-router.post("/update-groups", (req, res) => {
-  const { username, category, groups } = req.body;
-
-  if (!username || !category || !Array.isArray(groups)) {
-    return res.status(400).json({ error: "Missing or invalid parameters" });
-  }
-
-  const filePath = path.join(__dirname, `../users/${username}/groupData.json`);
-  let groupData = {};
-
-  try {
-    if (fs.existsSync(filePath)) {
-      groupData = JSON.parse(fs.readFileSync(filePath));
-    }
-
-    if (!groupData[category]) {
-      groupData[category] = [];
-    }
-
-    const uniqueGroups = new Set([...groupData[category], ...groups]);
-    groupData[category] = Array.from(uniqueGroups);
-
-    fs.writeFileSync(filePath, JSON.stringify(groupData, null, 2));
-    return res.status(200).json({ success: true, updated: groupData[category] });
-
-  } catch (err) {
-    console.error("Error updating groups:", err);
-    return res.status(500).json({ error: "Failed to update groups" });
-  }
-});
 
 // GET /quick-actions/groups?username=user_xyz
 router.get("/groups", (req, res) => {
@@ -65,6 +32,50 @@ router.get("/groups", (req, res) => {
   } catch (err) {
     console.error("Error reading group data:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /quick-actions/update-groups
+router.post("/update-groups", (req, res) => {
+  const { username, category, groups } = req.body;
+
+  if (!username || !category || !Array.isArray(groups)) {
+    return res.status(400).json({ error: "Missing or invalid parameters" });
+  }
+
+  const filePath = path.join(__dirname, `../users/${username}/groupData.json`);
+  let groupData = {};
+
+  try {
+    if (fs.existsSync(filePath)) {
+      groupData = JSON.parse(fs.readFileSync(filePath));
+    }
+
+    if (!groupData[category]) {
+      groupData[category] = [];
+    }
+
+    const uniqueGroups = new Set([...groupData[category], ...groups]);
+    groupData[category] = Array.from(uniqueGroups);
+
+    fs.writeFileSync(filePath, JSON.stringify(groupData, null, 2));
+
+    // ✅ Sync to bot memory
+    try {
+      const { USERS } = require("../index");
+      if (USERS[username]) {
+        USERS[username].categories = groupData;
+        console.log(`[${username}] Synced updated categories to memory.`);
+      }
+    } catch (syncErr) {
+      console.error(`[${username}] Warning: Could not sync categories to memory.`, syncErr);
+    }
+
+    return res.status(200).json({ success: true, updated: groupData[category] });
+
+  } catch (err) {
+    console.error("Error updating groups:", err);
+    return res.status(500).json({ error: "Failed to update groups" });
   }
 });
 
