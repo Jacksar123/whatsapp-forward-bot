@@ -18,7 +18,6 @@ const {
   handleBroadcastMessage
 } = require('./lib/broadcast');
 
-// ✅ Import the Quick Actions route
 const quickActionsRouter = require('./routes/quick-actions');
 
 const PORT = process.env.PORT || 10000;
@@ -81,7 +80,6 @@ function bindEventListeners(sock, username) {
 
       await autoScanAndCategorise(sock, username, USERS);
 
-      // ✅ Check if the socket is open before sending a message
       if (sock?.ws?.readyState === 1) {
         await sock.sendMessage(sock.user.id, {
           text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
@@ -150,10 +148,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mount the Quick Actions route
 app.use('/quick-actions', quickActionsRouter);
 
-// ROUTES
 app.post('/create-user', async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -176,10 +172,11 @@ app.get('/get-qr/:username', (req, res) => {
   res.json({ qr: u.qr });
 });
 
-// HEALTH CHECK
 app.get('/health', (_, res) => res.send('OK'));
 
-// LAUNCH
 app.listen(PORT, () => {
   console.log(`✅ Bot server running on port ${PORT}`);
 });
+
+// ✅ Expose USERS for other modules (like quick-actions) to access bot sessions
+module.exports = { USERS };
