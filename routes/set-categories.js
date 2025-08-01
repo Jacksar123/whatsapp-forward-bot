@@ -1,4 +1,7 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+
 const router = express.Router();
 
 module.exports = (USERS) => {
@@ -11,6 +14,16 @@ module.exports = (USERS) => {
     const categoryMap = req.body.categories || {}; // { "Shoes": ["Group A", "Group B"], ... }
 
     user.categories = categoryMap;
+
+    // ✅ Persist to categories.json
+    const filePath = path.join(__dirname, `../users/${username}/categories.json`);
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(categoryMap, null, 2));
+      console.log(`[${username}] categories.json updated via /set-categories`);
+    } catch (err) {
+      console.error(`[${username}] Failed to write categories.json:`, err.message);
+      return res.status(500).json({ error: 'Failed to save categories' });
+    }
 
     // ✅ Create a message summary
     const summaryLines = [];

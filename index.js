@@ -159,7 +159,7 @@ app.use((req, res, next) => {
 // ✅ Modular Routes
 app.use('/quick-actions', require('./routes/quick-actions')(USERS));
 app.use('/get-categories', require('./routes/get-categories')(USERS));
-app.use('/set-categories', require('./routes/set-categories')(USERS)); // << ✅ NEW route
+app.use('/set-categories', require('./routes/set-categories')(USERS));
 
 // ROUTES
 app.post('/create-user', async (req, res) => {
@@ -186,6 +186,35 @@ app.get('/get-qr/:username', (req, res) => {
 
 // HEALTH CHECK
 app.get('/health', (_, res) => res.send('OK'));
+
+// ✅ Rehydrate USERS from disk on startup
+const userDirs = fs.readdirSync(path.join(__dirname, 'users'));
+for (const username of userDirs) {
+  const base = path.join(__dirname, 'users', username);
+  const categoriesPath = path.join(base, 'categories.json');
+  const groupsPath = path.join(base, 'all_groups.json');
+
+  const categories = fs.existsSync(categoriesPath)
+    ? JSON.parse(fs.readFileSync(categoriesPath))
+    : {};
+  const allGroups = fs.existsSync(groupsPath)
+    ? JSON.parse(fs.readFileSync(groupsPath))
+    : {};
+
+  USERS[username] = {
+    sock: null,
+    qr: null,
+    categories,
+    allGroups,
+    pendingImage: null,
+    lastPromptChat: null,
+    connected: false,
+    ended: true,
+    restarting: false
+  };
+
+  console.log(`[INIT] Rehydrated ${username} from disk`);
+}
 
 // LAUNCH
 app.listen(PORT, () => {

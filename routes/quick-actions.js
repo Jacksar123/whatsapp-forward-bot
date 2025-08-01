@@ -11,7 +11,7 @@ module.exports = (USERS) => {
     if (!username) return res.status(400).json({ error: "Missing username" });
 
     const groupsPath = path.join(__dirname, `../users/${username}/all_groups.json`);
-    const dataPath = path.join(__dirname, `../users/${username}/groupData.json`);
+    const dataPath = path.join(__dirname, `../users/${username}/categories.json`);
 
     try {
       if (!fs.existsSync(groupsPath)) return res.json({ groups: [], categories: {} });
@@ -50,7 +50,7 @@ module.exports = (USERS) => {
       return res.status(400).json({ error: "Missing or invalid parameters" });
     }
 
-    const filePath = path.join(__dirname, `../users/${username}/groupData.json`);
+    const filePath = path.join(__dirname, `../users/${username}/categories.json`);
     let groupData = {};
 
     try {
