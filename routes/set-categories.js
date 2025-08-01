@@ -8,28 +8,40 @@ module.exports = (USERS) => {
   router.post('/:username', async (req, res) => {
     const { username } = req.params;
     const user = USERS[username];
-
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const categoryMap = req.body.categories || {}; // { "Shoes": ["Group A", "Group B"], ... }
+    const incoming = req.body.categories || {}; // New category assignments
+    const existing = user.categories || {};
 
-    user.categories = categoryMap;
+    // ✅ Merge: preserve all existing categories unless explicitly removed
+    const merged = { ...existing, ...incoming };
 
-    // ✅ Persist to categories.json
+    // ✅ Ensure no category is deleted — even if empty now
+    for (const cat of Object.keys(existing)) {
+      if (!(cat in incoming)) {
+        merged[cat] = existing[cat]; // Keep old groups if frontend didn't include this cat
+      }
+    }
+
+    user.categories = merged;
+
+    // ✅ Persist to disk
     const filePath = path.join(__dirname, `../users/${username}/categories.json`);
     try {
-      fs.writeFileSync(filePath, JSON.stringify(categoryMap, null, 2));
+      fs.writeFileSync(filePath, JSON.stringify(merged, null, 2));
       console.log(`[${username}] categories.json updated via /set-categories`);
     } catch (err) {
       console.error(`[${username}] Failed to write categories.json:`, err.message);
       return res.status(500).json({ error: 'Failed to save categories' });
     }
 
-    // ✅ Create a message summary
+    // ✅ WhatsApp summary message
     const summaryLines = [];
-    for (const [category, groupList] of Object.entries(categoryMap)) {
-      summaryLines.push(`📦 *${category}*:\n${groupList.map(g => `- ${g}`).join('\n')}`);
+    for (const [category, groupList] of Object.entries(merged)) {
+      const groups = groupList.length ? groupList.map(g => `- ${g}`).join('\n') : '_no groups_';
+      summaryLines.push(`📦 *${category}*:\n${groups}`);
     }
+
     const summary = `✅ Categories updated:\n\n${summaryLines.join('\n\n')}`;
 
     try {
