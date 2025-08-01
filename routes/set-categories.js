@@ -10,39 +10,29 @@ module.exports = (USERS) => {
     const user = USERS[username];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const incoming = req.body.categories || {}; // New category assignments
-    const existing = user.categories || {};
+    const incoming = req.body.categories || {}; // { "Tech": ["Group A", "Group B"] }
 
-    // ✅ Merge: preserve all existing categories unless explicitly removed
-    const merged = { ...existing, ...incoming };
+    // ✅ Overwrite all previous category data
+    user.categories = incoming;
 
-    // ✅ Ensure no category is deleted — even if empty now
-    for (const cat of Object.keys(existing)) {
-      if (!(cat in incoming)) {
-        merged[cat] = existing[cat]; // Keep old groups if frontend didn't include this cat
-      }
-    }
-
-    user.categories = merged;
-
-    // ✅ Persist to disk
+    // ✅ Persist to file
     const filePath = path.join(__dirname, `../users/${username}/categories.json`);
     try {
-      fs.writeFileSync(filePath, JSON.stringify(merged, null, 2));
-      console.log(`[${username}] categories.json updated via /set-categories`);
+      fs.writeFileSync(filePath, JSON.stringify(incoming, null, 2));
+      console.log(`[${username}] categories.json overwritten.`);
     } catch (err) {
       console.error(`[${username}] Failed to write categories.json:`, err.message);
       return res.status(500).json({ error: 'Failed to save categories' });
     }
 
-    // ✅ WhatsApp summary message
+    // ✅ WhatsApp summary
     const summaryLines = [];
-    for (const [category, groupList] of Object.entries(merged)) {
-      const groups = groupList.length ? groupList.map(g => `- ${g}`).join('\n') : '_no groups_';
-      summaryLines.push(`📦 *${category}*:\n${groups}`);
+    for (const [cat, groupList] of Object.entries(incoming)) {
+      const lines = groupList.length ? groupList.map(g => `- ${g}`).join('\n') : '_no groups_';
+      summaryLines.push(`📦 *${cat}*:\n${lines}`);
     }
 
-    const summary = `✅ Categories updated:\n\n${summaryLines.join('\n\n')}`;
+    const summary = `✅ Categories updated (multi-category allowed):\n\n${summaryLines.join('\n\n')}`;
 
     try {
       await user.sock.sendMessage(user.sock.user.id, { text: summary });
