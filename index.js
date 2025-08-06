@@ -67,18 +67,22 @@ function bindEventListeners(sock, username) {
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (!USERS[username]) USERS[username] = {};
-    if (qr) USERS[username].qr = qr;
+    if (qr) {
+      USERS[username].qr = qr;
+      console.log(`[${username}] 🔄 New QR code generated`);
+    }
 
     if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
+      const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || 'unknown';
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       console.warn(`[${username}] Connection closed (code: ${code}). Reconnect: ${shouldReconnect}`);
       USERS[username].connected = false;
       if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
     } else if (connection === 'open') {
-      console.log(`[${username}] WhatsApp connected.`);
+      console.log(`[${username}] ✅ WhatsApp connected.`);
       USERS[username].connected = true;
       USERS[username].lastActive = Date.now();
+      USERS[username].qr = null; // Clear QR once connected
 
       await autoScanAndCategorise(sock, username, USERS);
 
@@ -185,8 +189,16 @@ app.post('/create-user', async (req, res) => {
 app.get('/get-qr/:username', (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
-  if (!u) return res.status(404).json({ error: 'User not found' });
-  res.json({ qr: u.qr });
+
+  if (!u) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (!u.qr) {
+    return res.status(202).json({ message: 'QR not ready yet' });
+  }
+
+  return res.status(200).json({ qr: u.qr });
 });
 
 // HEALTH CHECK
