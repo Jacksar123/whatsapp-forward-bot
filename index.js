@@ -18,6 +18,8 @@ const {
   handleBroadcastMessage
 } = require('./lib/broadcast');
 
+const { cleanupOldMedia } = require("./cleanup");
+
 const PORT = process.env.PORT || 10000;
 const USERS = {};
 
@@ -53,6 +55,7 @@ function endUserSession(username) {
 
 function bindEventListeners(sock, username) {
   sock.ev.on('messages.upsert', async ({ messages }) => {
+    USERS[username].lastActive = Date.now();
     for (const msg of messages) {
       try {
         await handleBroadcastMessage(username, msg, USERS);
@@ -75,6 +78,7 @@ function bindEventListeners(sock, username) {
     } else if (connection === 'open') {
       console.log(`[${username}] WhatsApp connected.`);
       USERS[username].connected = true;
+      USERS[username].lastActive = Date.now();
 
       await autoScanAndCategorise(sock, username, USERS);
 
@@ -125,7 +129,8 @@ async function startUserSession(username) {
     lastPromptChat: null,
     ended: false,
     restarting: false,
-    connected: false
+    connected: false,
+    lastActive: Date.now()
   };
 
   sock.ev.on('creds.update', saveCreds);
@@ -210,11 +215,21 @@ for (const username of userDirs) {
     lastPromptChat: null,
     connected: false,
     ended: true,
-    restarting: false
+    restarting: false,
+    lastActive: Date.now()
   };
 
   console.log(`[INIT] Rehydrated ${username} from disk`);
 }
+
+// 🧹 Schedule media cleanup every 6 hours
+setInterval(() => {
+  console.log("🧹 Starting media cleanup...");
+  cleanupOldMedia();
+}, 6 * 60 * 60 * 1000); // every 6 hours
+
+// Optional: Run once at startup
+cleanupOldMedia();
 
 // LAUNCH
 app.listen(PORT, () => {
