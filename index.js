@@ -82,7 +82,7 @@ function bindEventListeners(sock, username) {
       console.log(`[${username}] ✅ WhatsApp connected.`);
       USERS[username].connected = true;
       USERS[username].lastActive = Date.now();
-      USERS[username].qr = null; // Clear QR once connected
+      USERS[username].qr = null; // Clear QR after successful connection
 
       await autoScanAndCategorise(sock, username, USERS);
 
@@ -108,6 +108,20 @@ async function startUserSession(username) {
     }
   }
 
+  // ✅ Register user early to avoid QR 404 issues
+  USERS[username] = {
+    sock: null,
+    qr: null,
+    categories: {},
+    allGroups: {},
+    pendingImage: null,
+    lastPromptChat: null,
+    ended: false,
+    restarting: false,
+    connected: false,
+    lastActive: Date.now()
+  };
+
   const base = userBase(username);
   ensureDir(base);
   const logger = P({ level: 'silent' });
@@ -124,18 +138,7 @@ async function startUserSession(username) {
     browser: ['Chrome (Linux)', 'Chrome', '127.0.0.1']
   });
 
-  USERS[username] = {
-    sock,
-    qr: null,
-    categories: {},
-    allGroups: {},
-    pendingImage: null,
-    lastPromptChat: null,
-    ended: false,
-    restarting: false,
-    connected: false,
-    lastActive: Date.now()
-  };
+  USERS[username].sock = sock;
 
   sock.ev.on('creds.update', saveCreds);
   bindEventListeners(sock, username);
@@ -238,10 +241,9 @@ for (const username of userDirs) {
 setInterval(() => {
   console.log("🧹 Starting media cleanup...");
   cleanupOldMedia();
-}, 6 * 60 * 60 * 1000); // every 6 hours
+}, 6 * 60 * 60 * 1000);
 
-// Optional: Run once at startup
-cleanupOldMedia();
+cleanupOldMedia(); // Run once on startup
 
 // LAUNCH
 app.listen(PORT, () => {
