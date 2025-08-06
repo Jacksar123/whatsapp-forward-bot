@@ -82,7 +82,7 @@ function bindEventListeners(sock, username) {
       console.log(`[${username}] ✅ WhatsApp connected.`);
       USERS[username].connected = true;
       USERS[username].lastActive = Date.now();
-      USERS[username].qr = null; // Clear QR after successful connection
+      USERS[username].qr = null;
 
       await autoScanAndCategorise(sock, username, USERS);
 
@@ -108,7 +108,6 @@ async function startUserSession(username) {
     }
   }
 
-  // ✅ Register user early to avoid QR 404 issues
   USERS[username] = {
     sock: null,
     qr: null,
@@ -150,7 +149,6 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
-// ✅ CORS for frontend preview and prod
 const allowedOrigins = [
   "https://whats-broadcast-hub.lovable.app",
   "https://preview--whats-broadcast-hub.lovable.app"
@@ -168,12 +166,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Modular Routes
+// ROUTES
 app.use('/quick-actions', require('./routes/quick-actions')(USERS));
 app.use('/get-categories', require('./routes/get-categories')(USERS));
 app.use('/set-categories', require('./routes/set-categories')(USERS));
 
-// ROUTES
 app.post('/create-user', async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -193,21 +190,28 @@ app.get('/get-qr/:username', (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
 
-  if (!u) {
+  if (!u) return res.status(404).json({ error: 'User not found' });
+  if (!u.qr) return res.status(202).json({ message: 'QR not ready yet' });
+
+  return res.status(200).json({ qr: u.qr });
+});
+
+// ✅ CONNECTION STATUS ROUTE
+app.get('/connection-status/:username', (req, res) => {
+  const { username } = req.params;
+  const user = USERS[username];
+
+  if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  if (!u.qr) {
-    return res.status(202).json({ message: 'QR not ready yet' });
-  }
-
-  return res.status(200).json({ qr: u.qr });
+  return res.json({ connected: !!user.connected });
 });
 
 // HEALTH CHECK
 app.get('/health', (_, res) => res.send('OK'));
 
-// ✅ Rehydrate USERS from disk on startup
+// ✅ Rehydrate USERS from disk
 const userDirs = fs.readdirSync(path.join(__dirname, 'users'));
 for (const username of userDirs) {
   const base = path.join(__dirname, 'users', username);
@@ -237,7 +241,7 @@ for (const username of userDirs) {
   console.log(`[INIT] Rehydrated ${username} from disk`);
 }
 
-// 🧹 Schedule media cleanup every 6 hours
+// 🧹 Media cleanup every 6 hours
 setInterval(() => {
   console.log("🧹 Starting media cleanup...");
   cleanupOldMedia();
@@ -245,7 +249,7 @@ setInterval(() => {
 
 cleanupOldMedia(); // Run once on startup
 
-// LAUNCH
+// LAUNCH SERVER
 app.listen(PORT, () => {
   console.log(`✅ Bot server running on port ${PORT}`);
 });
