@@ -1,35 +1,36 @@
-require('dotenv').config();
+require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const cors = require("cors");
+const P = require("pino");
 
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const P = require('pino');
-const cors = require('cors');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason
-} = require('@whiskeysockets/baileys');
+} = require("@whiskeysockets/baileys");
+
+const {
+  ensureDir,
+  getUserPaths,
+  writeJSON,
+  readJSON,
+  getUserBasePath
+} = require("./lib/utils");
 
 const {
   autoScanAndCategorise,
   handleBroadcastMessage
-} = require('./lib/broadcast');
+} = require("./lib/broadcast");
 
 const { cleanupOldMedia } = require("./cleanup");
 
 const PORT = process.env.PORT || 10000;
+const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const USERS = {};
-
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-function userBase(username) {
-  return path.join(__dirname, 'users', username);
-}
 
 function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
@@ -47,39 +48,46 @@ function endUserSession(username) {
       u.sock.end();
     }
   } catch (err) {
-    console.warn(`[server] Error while ending session for ${username}:`, err.message);
+    console.warn(`[server] Error ending session: ${err.message}`);
   }
 
   delete USERS[username];
 }
 
 function bindEventListeners(sock, username) {
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on("messages.upsert", async ({ messages }) => {
     USERS[username].lastActive = Date.now();
     for (const msg of messages) {
       try {
         await handleBroadcastMessage(username, msg, USERS);
       } catch (err) {
-        console.error(`[${username}] Error handling msg:`, err);
+        console.error(`[${username}] Message error:`, err);
       }
     }
   });
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (!USERS[username]) USERS[username] = {};
     if (qr) {
       USERS[username].qr = qr;
-      console.log(`[${username}] 🔄 New QR code generated`);
+      console.log(`[${username}] 🔄 QR code generated`);
     }
 
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || 'unknown';
+    if (connection === "close") {
+      const code =
+        lastDisconnect?.error?.output?.statusCode ||
+        lastDisconnect?.error?.statusCode ||
+        "unknown";
+
       const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.warn(`[${username}] Connection closed (code: ${code}). Reconnect: ${shouldReconnect}`);
       USERS[username].connected = false;
+
+      console.warn(`[${username}] Connection closed (code: ${code})`);
       if (shouldReconnect) setTimeout(() => startUserSession(username), 3000);
-    } else if (connection === 'open') {
-      console.log(`[${username}] ✅ WhatsApp connected.`);
+    }
+
+    if (connection === "open") {
+      console.log(`[${username}] ✅ Connected to WhatsApp`);
       USERS[username].connected = true;
       USERS[username].lastActive = Date.now();
       USERS[username].qr = null;
@@ -89,23 +97,22 @@ function bindEventListeners(sock, username) {
       setTimeout(async () => {
         try {
           await sock.sendMessage(sock.user.id, {
-            text: '✅ WhatsApp connected.\nSend an image to begin.\n/help for commands.'
+            text: "✅ WhatsApp connected.\nSend an image to begin.\n/help for commands."
           });
         } catch (err) {
-          console.warn(`[${username}] Failed to send welcome message:`, err.message);
+          console.warn(`[${username}] Welcome message failed:`, err.message);
         }
       }, 2000);
     }
   });
 
-  console.log(`[${username}] ✅ Bound event listeners.`);
+  console.log(`[${username}] ✅ Event listeners bound`);
 }
 
 async function startUserSession(username) {
-  for (const existing in USERS) {
-    if (existing !== username) {
-      endUserSession(existing);
-    }
+  // Only allow 1 active session at a time
+  for (const other of Object.keys(USERS)) {
+    if (other !== username) endUserSession(other);
   }
 
   USERS[username] = {
@@ -116,15 +123,16 @@ async function startUserSession(username) {
     pendingImage: null,
     lastPromptChat: null,
     ended: false,
-    restarting: false,
     connected: false,
+    restarting: false,
     lastActive: Date.now()
   };
 
-  const base = userBase(username);
-  ensureDir(base);
-  const logger = P({ level: 'silent' });
-  const { state, saveCreds } = await useMultiFileAuthState(path.join(base, 'auth_info'));
+  const paths = getUserPaths(username);
+  ensureDir(paths.base);
+
+  const logger = P({ level: "silent" });
+  const { state, saveCreds } = await useMultiFileAuthState(paths.auth);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -134,12 +142,12 @@ async function startUserSession(username) {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    browser: ['Chrome (Linux)', 'Chrome', '127.0.0.1']
+    browser: ["Ubuntu", "Chrome", "20.04"]
   });
 
   USERS[username].sock = sock;
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on("creds.update", saveCreds);
   bindEventListeners(sock, username);
 
   return USERS[username];
@@ -157,73 +165,74 @@ const allowedOrigins = [
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
-    res.header("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Origin", origin);
   }
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.header("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
-// ROUTES
-app.use('/quick-actions', require('./routes/quick-actions')(USERS));
-app.use('/get-categories', require('./routes/get-categories')(USERS));
-app.use('/set-categories', require('./routes/set-categories')(USERS));
+// ✅ ADMIN ROUTE GUARD
+app.use("/admin", (req, res, next) => {
+  const token = req.headers["authorization"];
+  if (token !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+});
 
-app.post('/create-user', async (req, res) => {
+// ROUTES
+app.use("/quick-actions", require("./routes/quick-actions")(USERS));
+app.use("/get-categories", require("./routes/get-categories")(USERS));
+app.use("/set-categories", require("./routes/set-categories")(USERS));
+app.use("/admin", require("./routes/admin")(USERS, startUserSession, endUserSession));
+
+// ✅ Create user session
+app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
     if (!username) {
       username = generateUsername();
-      console.log(`[server] new user: ${username}`);
+      console.log(`[server] Generated new user: ${username}`);
     }
     await startUserSession(username);
     res.json({ ok: true, username });
   } catch (err) {
-    console.error('/create-user failed', err);
+    console.error("/create-user failed:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/get-qr/:username', (req, res) => {
+// ✅ Return QR code for client
+app.get("/get-qr/:username", (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
 
-  if (!u) return res.status(404).json({ error: 'User not found' });
-  if (!u.qr) return res.status(202).json({ message: 'QR not ready yet' });
+  if (!u) return res.status(404).json({ error: "User not found" });
+  if (!u.qr) return res.status(202).json({ message: "QR not ready yet" });
 
   return res.status(200).json({ qr: u.qr });
 });
 
-// ✅ CONNECTION STATUS ROUTE
-app.get('/connection-status/:username', (req, res) => {
+// ✅ Connection status
+app.get("/connection-status/:username", (req, res) => {
   const { username } = req.params;
   const user = USERS[username];
-
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
+  if (!user) return res.status(404).json({ error: "User not found" });
   return res.json({ connected: !!user.connected });
 });
 
-// HEALTH CHECK
-app.get('/health', (_, res) => res.send('OK'));
+// ✅ Health check
+app.get("/health", (_, res) => res.send("OK"));
 
-// ✅ Rehydrate USERS from disk
-const userDirs = fs.readdirSync(path.join(__dirname, 'users'));
+// ✅ Rehydrate users on startup
+const userDirs = fs.readdirSync(path.join(__dirname, "users"));
 for (const username of userDirs) {
-  const base = path.join(__dirname, 'users', username);
-  const categoriesPath = path.join(base, 'categories.json');
-  const groupsPath = path.join(base, 'all_groups.json');
-
-  const categories = fs.existsSync(categoriesPath)
-    ? JSON.parse(fs.readFileSync(categoriesPath))
-    : {};
-  const allGroups = fs.existsSync(groupsPath)
-    ? JSON.parse(fs.readFileSync(groupsPath))
-    : {};
+  const paths = getUserPaths(username);
+  const categories = readJSON(paths.categories);
+  const allGroups = readJSON(paths.groups);
 
   USERS[username] = {
     sock: null,
@@ -238,7 +247,7 @@ for (const username of userDirs) {
     lastActive: Date.now()
   };
 
-  console.log(`[INIT] Rehydrated ${username} from disk`);
+  console.log(`[INIT] Rehydrated ${username}`);
 }
 
 // 🧹 Media cleanup every 6 hours
@@ -249,7 +258,36 @@ setInterval(() => {
 
 cleanupOldMedia(); // Run once on startup
 
-// LAUNCH SERVER
+// 🕒 Auto-end sessions after inactivity
+setInterval(() => {
+  const now = Date.now();
+
+  for (const username in USERS) {
+    const user = USERS[username];
+
+    if (
+      user.connected &&
+      !user.ended &&
+      now - user.lastActive > SESSION_TIMEOUT_MS
+    ) {
+      console.log(`[TIMEOUT] Ending session for ${username} due to inactivity.`);
+
+      try {
+        if (user.sock) {
+          user.sock.sendMessage(user.sock.user.id, {
+            text: `🕒 Session ended after 15 minutes of inactivity.\nReconnect by scanning a new QR.`
+          });
+        }
+      } catch (err) {
+        console.warn(`[${username}] Failed to send timeout message:`, err.message);
+      }
+
+      endUserSession(username);
+    }
+  }
+}, 60 * 1000); // check every minute
+
+// ✅ Start server
 app.listen(PORT, () => {
-  console.log(`✅ Bot server running on port ${PORT}`);
+  console.log(`🚀 Bot server running on port ${PORT}`);
 });

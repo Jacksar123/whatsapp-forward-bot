@@ -1,6 +1,7 @@
-const fs = require("fs").promises;
-const path = require("path");
 const express = require("express");
+const fs = require("fs-extra");
+const path = require("path");
+const { readJSON, writeJSON, getUserPaths } = require("../lib/utils");
 
 module.exports = (USERS) => {
   const router = express.Router();
@@ -10,30 +11,19 @@ module.exports = (USERS) => {
     const { username } = req.query;
     if (!username) return res.status(400).json({ error: "Missing username" });
 
-    const userPath = path.join(__dirname, `../users/${username}`);
-    const groupsPath = path.join(userPath, "all_groups.json");
-    const categoriesPath = path.join(userPath, "categories.json");
+    const paths = getUserPaths(username);
+    let allGroups = {};
+    let categories = {};
 
     try {
-      let allGroups = {};
-      let categories = {};
-
-      // Try loading from memory first
       const user = USERS[username];
-      if (user && user.sock && user.connected) {
+
+      if (user?.connected) {
         allGroups = user.allGroups || {};
         categories = user.categories || {};
       } else {
-        // If not connected, load from disk
-        try {
-          const groupsData = await fs.readFile(groupsPath, "utf-8");
-          allGroups = JSON.parse(groupsData);
-        } catch (_) {}
-
-        try {
-          const catData = await fs.readFile(categoriesPath, "utf-8");
-          categories = JSON.parse(catData);
-        } catch (_) {}
+        allGroups = await fs.readJson(paths.groups).catch(() => ({}));
+        categories = await fs.readJson(paths.categories).catch(() => ({}));
       }
 
       const groupNames = Object.values(allGroups)
@@ -55,26 +45,19 @@ module.exports = (USERS) => {
       return res.status(400).json({ error: "Missing or invalid parameters" });
     }
 
-    const filePath = path.join(__dirname, `../users/${username}/categories.json`);
-
+    const paths = getUserPaths(username);
     try {
-      let groupData = {};
-
-      try {
-        const existing = await fs.readFile(filePath, "utf-8");
-        groupData = JSON.parse(existing);
-      } catch (_) {}
-
+      const groupData = readJSON(paths.categories);
       if (!groupData[category]) groupData[category] = [];
 
       const unique = new Set([...groupData[category], ...groups]);
       groupData[category] = Array.from(unique);
 
-      await fs.writeFile(filePath, JSON.stringify(groupData, null, 2));
+      writeJSON(paths.categories, groupData);
 
       if (USERS[username]) {
         USERS[username].categories = groupData;
-        console.log(`[${username}] Synced updated categories to memory.`);
+        console.log(`[${username}] ✅ Updated in memory`);
       }
 
       return res.status(200).json({ success: true, updated: groupData[category] });
