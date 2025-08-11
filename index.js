@@ -28,7 +28,8 @@ const {
 const { cleanupOldMedia } = require("./cleanup");
 
 const PORT = process.env.PORT || 10000;
-const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const USERS = {};
 
 // --- QR / Reconnect controls ---
@@ -124,6 +125,7 @@ function bindEventListeners(sock, username) {
         "unknown";
 
       u.connected = false;
+      u.needsReconnect = true; // let frontend know to prompt reconnect
 
       // backoff for reconnect
       u.reconnectDelay = Math.min(
@@ -142,6 +144,7 @@ function bindEventListeners(sock, username) {
     if (connection === "open") {
       console.log(`[${username}] ✅ Connected to WhatsApp`);
       u.connected = true;
+      u.needsReconnect = false;
       u.lastActive = Date.now();
       u.qr = null;
       u.qrAttempts = 0;
@@ -289,7 +292,7 @@ app.get("/connection-status/:username", (req, res) => {
   const { username } = req.params;
   const user = USERS[username];
   if (!user) return res.status(404).json({ error: "User not found" });
-  return res.json({ connected: !!user.connected });
+  return res.json({ connected: !!user.connected, needsReconnect: !!user.needsReconnect });
 });
 
 // ✅ Health check
@@ -350,7 +353,10 @@ setInterval(() => {
       try {
         if (user.sock) {
           user.sock.sendMessage(user.sock.user.id, {
-            text: `🕒 Session ended after 15 minutes of inactivity.\nReconnect by scanning a new QR.`
+            text:
+              `🕒 Session ended after 30 minutes of inactivity.\n` +
+              `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
+              `If a QR is shown, scan it to resume.`
           });
         }
       } catch (err) {
