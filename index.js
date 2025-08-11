@@ -2,7 +2,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
-const cors = require("cors");
+const cors = require("cors"); // (import ok even if using custom CORS)
 const P = require("pino");
 
 const {
@@ -27,17 +27,19 @@ const {
 
 const { cleanupOldMedia } = require("./cleanup");
 
+/* ----------------------------- config ----------------------------------- */
+
 const PORT = process.env.PORT || 10000;
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const USERS = {};
 
-// --- QR / Reconnect controls ---
-const QR_DEBOUNCE_MS = 15_000;       // ignore QR updates within 15s window
-const MAX_QR_ATTEMPTS = 6;           // stop after 6 unscanned QRs
-const QR_PAUSE_MS = 2 * 60_000;      // pause QR regen for 2 minutes if exceeded
-const RECONNECT_BASE_MS = 3_000;     // base reconnect delay
-const RECONNECT_MAX_MS = 60_000;     // cap
+// QR / reconnect tuning
+const QR_DEBOUNCE_MS = 15_000;  // ignore QR updates within 15s
+const MAX_QR_ATTEMPTS = 6;      // stop after 6 unscanned QRs
+const QR_PAUSE_MS = 2 * 60_000; // pause 2 minutes if attempts exceeded
+const RECONNECT_BASE_MS = 3_000;
+const RECONNECT_MAX_MS = 60_000;
 
 /* ----------------------------- helpers ---------------------------------- */
 
@@ -45,7 +47,6 @@ function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
 }
 
-// persist categories & groups safely
 function persistUserState(username) {
   const u = USERS[username];
   if (!u) return;
@@ -63,9 +64,8 @@ function endUserSession(username) {
   const u = USERS[username];
   if (!u || !u.sock || u.ended) return;
 
-  // ✅ save before ending
+  // save before ending
   persistUserState(username);
-
   console.log(`[server] Ending session: ${username}`);
   u.ended = true;
 
@@ -96,18 +96,18 @@ function bindEventListeners(sock, username) {
     const u = USERS[username] || (USERS[username] = {});
     const now = Date.now();
 
-    // 🔒 QR handling: debounce + attempt limits + pause window
+    // QR handling: debounce + attempt limits + pause window
     if (qr) {
-      if (u.qrPausedUntil && now < u.qrPausedUntil) {
-        // ignore QR while paused
-      } else {
+      if (!(u.qrPausedUntil && now < u.qrPausedUntil)) {
         if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
           u.lastQrAt = now;
           u.qr = qr;
           u.qrAttempts = (u.qrAttempts || 0) + 1;
           console.log(`[${username}] 🔄 QR code generated (attempt ${u.qrAttempts})`);
           if (u.qrAttempts > MAX_QR_ATTEMPTS) {
-            console.warn(`[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS/1000)|0}s`);
+            console.warn(
+              `[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s`
+            );
             u.qr = null;
             u.qrPausedUntil = now + QR_PAUSE_MS;
           }
@@ -116,29 +116,43 @@ function bindEventListeners(sock, username) {
     }
 
     if (connection === "close") {
-      // ✅ persist on close as well
+      // persist on close
       persistUserState(username);
 
       const code =
         lastDisconnect?.error?.output?.statusCode ||
         lastDisconnect?.error?.statusCode ||
-        "unknown";
+        lastDisconnect?.error?.reason ||
+        0;
 
       u.connected = false;
-      u.needsReconnect = true; // let frontend know to prompt reconnect
+      u.needsReconnect = true;
 
-      // backoff for reconnect
+      // STOP the loop on connectionReplaced (440) or loggedOut
+      if (
+        code === DisconnectReason.connectionReplaced ||
+        code === DisconnectReason.loggedOut
+      ) {
+        console.warn(`[${username}] Connection closed (code: ${code}). Not reconnecting.`);
+
+        // reset QR counters so frontend can fetch a fresh QR
+        u.qr = null;
+        u.qrAttempts = 0;
+        u.qrPausedUntil = 0;
+        u.reconnectDelay = RECONNECT_BASE_MS;
+        return;
+      }
+
+      // otherwise backoff + reconnect (timedOut, restartRequired, etc.)
       u.reconnectDelay = Math.min(
         Math.max(u.reconnectDelay || RECONNECT_BASE_MS, RECONNECT_BASE_MS) * 2,
         RECONNECT_MAX_MS
       );
 
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.warn(`[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms: ${shouldReconnect}`);
-
-      if (shouldReconnect) {
-        setTimeout(() => startUserSession(username), u.reconnectDelay);
-      }
+      console.warn(
+        `[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`
+      );
+      setTimeout(() => startUserSession(username), u.reconnectDelay);
     }
 
     if (connection === "open") {
@@ -151,9 +165,8 @@ function bindEventListeners(sock, username) {
       u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
 
-      // Scan/categorise; auto-save happens below
+      // scan & categorise, then persist
       await autoScanAndCategorise(sock, username, USERS);
-      // ✅ persist after (re)scan to keep disk current
       persistUserState(username);
 
       setTimeout(async () => {
@@ -180,15 +193,15 @@ async function startUserSession(username) {
   const paths = getUserPaths(username);
   ensureDir(paths.base);
 
-  // ✅ Rehydrate from disk so categories/groups exist pre-QR
+  // rehydrate from disk so categories/groups exist pre-QR
   const savedCategories = readJSON(paths.categories, {});
   const savedGroups = readJSON(paths.groups, {});
 
   USERS[username] = {
     sock: null,
     qr: null,
-    categories: savedCategories, // restore
-    allGroups: savedGroups,      // restore
+    categories: savedCategories,
+    allGroups: savedGroups,
     pendingImage: null,
     lastPromptChat: null,
     ended: false,
@@ -245,7 +258,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ ADMIN ROUTE GUARD
+// ADMIN ROUTE GUARD
 app.use("/admin", (req, res, next) => {
   const token = req.headers["authorization"];
   if (token !== process.env.ADMIN_SECRET) {
@@ -260,7 +273,7 @@ app.use("/get-categories", require("./routes/get-categories")(USERS));
 app.use("/set-categories", require("./routes/set-categories")(USERS));
 app.use("/admin", require("./routes/admin")(USERS, startUserSession, endUserSession));
 
-// ✅ Create user session
+// Create user session
 app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -276,7 +289,7 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// ✅ Return QR code for client
+// Return QR code for client
 app.get("/get-qr/:username", (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
@@ -287,7 +300,7 @@ app.get("/get-qr/:username", (req, res) => {
   return res.status(200).json({ qr: u.qr });
 });
 
-// ✅ Connection status
+// Connection status
 app.get("/connection-status/:username", (req, res) => {
   const { username } = req.params;
   const user = USERS[username];
@@ -295,59 +308,58 @@ app.get("/connection-status/:username", (req, res) => {
   return res.json({ connected: !!user.connected, needsReconnect: !!user.needsReconnect });
 });
 
-// ✅ Health check
+// Health check
 app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
 
-const userDirs = fs.readdirSync(path.join(__dirname, "users"));
-for (const username of userDirs) {
-  const paths = getUserPaths(username);
-  const categories = readJSON(paths.categories, {});
-  const allGroups = readJSON(paths.groups, {});
+const usersDirPath = path.join(__dirname, "users");
+if (fs.existsSync(usersDirPath)) {
+  const userDirs = fs.readdirSync(usersDirPath);
+  for (const username of userDirs) {
+    const paths = getUserPaths(username);
+    const categories = readJSON(paths.categories, {});
+    const allGroups = readJSON(paths.groups, {});
 
-  USERS[username] = {
-    sock: null,
-    qr: null,
-    categories,
-    allGroups,
-    pendingImage: null,
-    lastPromptChat: null,
-    connected: false,
-    ended: true,
-    restarting: false,
-    lastActive: Date.now(),
-    lastQrAt: 0,
-    qrAttempts: 0,
-    qrPausedUntil: 0,
-    reconnectDelay: RECONNECT_BASE_MS
-  };
+    USERS[username] = {
+      sock: null,
+      qr: null,
+      categories,
+      allGroups,
+      pendingImage: null,
+      lastPromptChat: null,
+      connected: false,
+      ended: true,
+      restarting: false,
+      lastActive: Date.now(),
+      lastQrAt: 0,
+      qrAttempts: 0,
+      qrPausedUntil: 0,
+      reconnectDelay: RECONNECT_BASE_MS
+    };
 
-  console.log(`[INIT] Rehydrated ${username}`);
+    console.log(`[INIT] Rehydrated ${username}`);
+  }
 }
 
 /* ---------------------- background maintenance --------------------------- */
 
-// 🧹 Media cleanup every 6 hours
+// Media cleanup every 6 hours
 setInterval(() => {
   console.log("🧹 Starting media cleanup...");
   cleanupOldMedia();
 }, 6 * 60 * 60 * 1000);
 
-cleanupOldMedia(); // Run once on startup
+cleanupOldMedia(); // once on startup
 
-// 🕒 Auto-end sessions after inactivity
+// Auto-end sessions after inactivity
 setInterval(() => {
   const now = Date.now();
 
   for (const username in USERS) {
     const user = USERS[username];
 
-    if (
-      user.connected &&
-      !user.ended &&
-      now - user.lastActive > SESSION_TIMEOUT_MS
-    ) {
+    if (user.connected && !user.ended && now - user.lastActive > SESSION_TIMEOUT_MS) {
       console.log(`[TIMEOUT] Ending session for ${username} due to inactivity.`);
 
       try {
@@ -363,14 +375,13 @@ setInterval(() => {
         console.warn(`[${username}] Failed to send timeout message:`, err.message);
       }
 
-      // ✅ persist before ending
       persistUserState(username);
       endUserSession(username);
     }
   }
-}, 60 * 1000); // check every minute
+}, 60 * 1000);
 
-// 🧠 Memory monitor (low overhead)
+// Low-overhead memory monitor
 setInterval(() => {
   const m = process.memoryUsage();
   const rss = (m.rss / 1048576).toFixed(1);
