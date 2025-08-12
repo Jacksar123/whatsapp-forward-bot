@@ -28,13 +28,15 @@ module.exports = (USERS) => {
       const categoryNames = Object.keys(categories);
       const groups = Object.entries(allGroups).map(([jid, group]) => {
         const name = group.name || group.subject || jid;
-        const foundCat = categoryNames.find(cat => (categories[cat] || []).includes(jid));
+        const foundCat = categoryNames.find(cat =>
+          (categories[cat] || []).includes(jid)
+        );
         return { name, category: foundCat || null };
       });
 
       return res.json({ categories: categoryNames, groups });
     } catch (err) {
-      console.error([${username}] Error in get-categories:, err.message);
+      console.error(`[${username}] Error in get-categories:`, err.message);
       return res.status(500).json({ error: "Internal server error" });
     }
   });

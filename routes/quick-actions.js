@@ -32,7 +32,7 @@ module.exports = (USERS) => {
 
       res.json({ groups: groupNames, categories });
     } catch (err) {
-      console.error([${username}] Error in /quick-actions/groups:, err.message);
+      console.error(`[${username}] Error in /quick-actions/groups:`, err.message);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -57,12 +57,12 @@ module.exports = (USERS) => {
 
       if (USERS[username]) {
         USERS[username].categories = groupData;
-        console.log([${username}] ✅ Updated in memory);
+        console.log(`[${username}] ✅ Updated in memory`);
       }
 
       return res.status(200).json({ success: true, updated: groupData[category] });
     } catch (err) {
-      console.error([${username}] Error updating groups:, err.message);
+      console.error(`[${username}] Error updating groups:`, err.message);
       return res.status(500).json({ error: "Failed to update groups" });
     }
   });

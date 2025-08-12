@@ -8,9 +8,9 @@ module.exports = (USERS, startUserSession, endUserSession) => {
   router.get("/users", (req, res) => {
     const data = Object.entries(USERS).map(([username, user]) => ({
       username,
-      connected: user.connected,
-      ended: user.ended,
-      lastActive: new Date(user.lastActive).toISOString()
+      connected: !!user.connected,
+      ended: !!user.ended,
+      lastActive: user.lastActive ? new Date(user.lastActive).toISOString() : null,
     }));
 
     return res.json({ users: data });
@@ -22,7 +22,7 @@ module.exports = (USERS, startUserSession, endUserSession) => {
     if (!USERS[username]) return res.status(404).json({ error: "User not found" });
 
     endUserSession(username);
-    return res.json({ ok: true, message: Ended session for ${username} });
+    return res.json({ ok: true, message: `Ended session for ${username}` });
   });
 
   // ✅ POST /admin/restart/:username
@@ -30,14 +30,12 @@ module.exports = (USERS, startUserSession, endUserSession) => {
     const { username } = req.params;
     try {
       await startUserSession(username);
-      return res.json({ ok: true, message: Restarted session for ${username} });
+      return res.json({ ok: true, message: `Restarted session for ${username}` });
     } catch (err) {
-      console.error([admin] Restart failed for ${username}:, err.message);
+      console.error(`[admin] Restart failed for ${username}:`, err.message);
       return res.status(500).json({ error: "Failed to restart session" });
     }
   });
 
   return router;
 };
-
-
