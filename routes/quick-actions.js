@@ -1,9 +1,7 @@
-cp routes/quick-actions.js routes/quick-actions.backup.$(date +%s).js
-
-cat > routes/quick-actions.js <<'EOF'
 const express = require("express");
 const fs = require("fs-extra");
-const { readJSON, writeJSONAtomic, getUserPaths } = require("../lib/utils");
+const path = require("path");
+const { readJSON, writeJSON, getUserPaths } = require("../lib/utils");
 
 module.exports = (USERS) => {
   const router = express.Router();
@@ -34,7 +32,7 @@ module.exports = (USERS) => {
 
       res.json({ groups: groupNames, categories });
     } catch (err) {
-      console.error(`[${username}] Error in /quick-actions/groups:`, err.message);
+      console.error([${username}] Error in /quick-actions/groups:, err.message);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -55,20 +53,21 @@ module.exports = (USERS) => {
       const unique = new Set([...groupData[category], ...groups]);
       groupData[category] = Array.from(unique);
 
-      writeJSONAtomic(paths.categories, groupData);
+      writeJSON(paths.categories, groupData);
 
       if (USERS[username]) {
         USERS[username].categories = groupData;
-        console.log(`[${username}] ✅ Updated in memory`);
+        console.log([${username}] ✅ Updated in memory);
       }
 
       return res.status(200).json({ success: true, updated: groupData[category] });
     } catch (err) {
-      console.error(`[${username}] Error updating groups:`, err.message);
+      console.error([${username}] Error updating groups:, err.message);
       return res.status(500).json({ error: "Failed to update groups" });
     }
   });
 
   return router;
 };
-EOF
+
+

@@ -34,10 +34,12 @@ module.exports = (USERS) => {
 
       return res.json({ categories: categoryNames, groups });
     } catch (err) {
-      console.error(`[${username}] Error in get-categories:`, err.message);
+      console.error([${username}] Error in get-categories:, err.message);
       return res.status(500).json({ error: "Internal server error" });
     }
   });
 
   return router;
 };
+
+

@@ -1,7 +1,4 @@
-cp index.js index.backup.$(date +%s).js
-
-cat > index.js <<'EOF'
-require("dotenv").config();
+equire("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -19,7 +16,7 @@ const {
 const {
   ensureDir,
   getUserPaths,
-  writeJSONAtomic,
+  writeJSON,
   readJSON
 } = require("./lib/utils");
 
@@ -47,7 +44,7 @@ const RECONNECT_MAX_MS = 60_000;
 /* ----------------------------- helpers ---------------------------------- */
 
 function generateUsername() {
-  return `user_${Math.random().toString(16).slice(2, 10)}`;
+  return user_${Math.random().toString(16).slice(2, 10)};
 }
 
 function persistUserState(username) {
@@ -55,11 +52,11 @@ function persistUserState(username) {
   if (!u) return;
   try {
     const paths = getUserPaths(username);
-    writeJSONAtomic(paths.categories, u.categories || {});
-    writeJSONAtomic(paths.groups, u.allGroups || {});
-    console.log(`[persist] Saved categories & groups for ${username}`);
+    writeJSON(paths.categories, u.categories || {});
+    writeJSON(paths.groups, u.allGroups || {});
+    console.log([persist] Saved categories & groups for ${username});
   } catch (err) {
-    console.warn(`[persist] Failed to save state for ${username}:`, err.message);
+    console.warn([persist] Failed to save state for ${username}:, err.message);
   }
 }
 
@@ -69,7 +66,7 @@ function endUserSession(username) {
 
   // save before ending
   persistUserState(username);
-  console.log(`[server] Ending session: ${username}`);
+  console.log([server] Ending session: ${username});
   u.ended = true;
 
   try {
@@ -77,7 +74,7 @@ function endUserSession(username) {
       u.sock.end();
     }
   } catch (err) {
-    console.warn(`[server] Error ending session: ${err.message}`);
+    console.warn([server] Error ending session: ${err.message});
   }
 
   delete USERS[username];
@@ -90,7 +87,7 @@ function bindEventListeners(sock, username) {
       try {
         await handleBroadcastMessage(username, msg, USERS);
       } catch (err) {
-        console.error(`[${username}] Message error:`, err);
+        console.error([${username}] Message error:, err);
       }
     }
   });
@@ -106,10 +103,10 @@ function bindEventListeners(sock, username) {
           u.lastQrAt = now;
           u.qr = qr;
           u.qrAttempts = (u.qrAttempts || 0) + 1;
-          console.log(`[${username}] 🔄 QR code generated (attempt ${u.qrAttempts})`);
+          console.log([${username}] 🔄 QR code generated (attempt ${u.qrAttempts}));
           if (u.qrAttempts > MAX_QR_ATTEMPTS) {
             console.warn(
-              `[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s`
+              [${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s
             );
             u.qr = null;
             u.qrPausedUntil = now + QR_PAUSE_MS;
@@ -136,7 +133,7 @@ function bindEventListeners(sock, username) {
         code === DisconnectReason.connectionReplaced ||
         code === DisconnectReason.loggedOut
       ) {
-        console.warn(`[${username}] Connection closed (code: ${code}). Not reconnecting.`);
+        console.warn([${username}] Connection closed (code: ${code}). Not reconnecting.);
 
         // reset QR counters so frontend can fetch a fresh QR
         u.qr = null;
@@ -153,13 +150,13 @@ function bindEventListeners(sock, username) {
       );
 
       console.warn(
-        `[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`
+        [${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms
       );
       setTimeout(() => startUserSession(username), u.reconnectDelay);
     }
 
     if (connection === "open") {
-      console.log(`[${username}] ✅ Connected to WhatsApp`);
+      console.log([${username}] ✅ Connected to WhatsApp);
       u.connected = true;
       u.needsReconnect = false;
       u.lastActive = Date.now();
@@ -178,13 +175,13 @@ function bindEventListeners(sock, username) {
             text: "✅ WhatsApp connected.\nSend an image to begin.\n/help for commands."
           });
         } catch (err) {
-          console.warn(`[${username}] Welcome message failed:`, err.message);
+          console.warn([${username}] Welcome message failed:, err.message);
         }
       }, 2000);
     }
   });
 
-  console.log(`[${username}] ✅ Event listeners bound`);
+  console.log([${username}] ✅ Event listeners bound);
 }
 
 async function startUserSession(username) {
@@ -282,7 +279,7 @@ app.post("/create-user", async (req, res) => {
     let { username } = req.body || {};
     if (!username) {
       username = generateUsername();
-      console.log(`[server] Generated new user: ${username}`);
+      console.log([server] Generated new user: ${username});
     }
     await startUserSession(username);
     res.json({ ok: true, username });
@@ -316,8 +313,7 @@ app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
 
-// Respect DATA_DIR for rehydrate
-const usersDirPath = process.env.DATA_DIR || path.join(__dirname, "users");
+const usersDirPath = path.join(__dirname, "users");
 if (fs.existsSync(usersDirPath)) {
   const userDirs = fs.readdirSync(usersDirPath);
   for (const username of userDirs) {
@@ -342,7 +338,7 @@ if (fs.existsSync(usersDirPath)) {
       reconnectDelay: RECONNECT_BASE_MS
     };
 
-    console.log(`[INIT] Rehydrated ${username}`);
+    console.log([INIT] Rehydrated ${username});
   }
 }
 
@@ -364,19 +360,19 @@ setInterval(() => {
     const user = USERS[username];
 
     if (user.connected && !user.ended && now - user.lastActive > SESSION_TIMEOUT_MS) {
-      console.log(`[TIMEOUT] Ending session for ${username} due to inactivity.`);
+      console.log([TIMEOUT] Ending session for ${username} due to inactivity.);
 
       try {
         if (user.sock) {
           user.sock.sendMessage(user.sock.user.id, {
             text:
-              `🕒 Session ended after 30 minutes of inactivity.\n` +
-              `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
-              `If a QR is shown, scan it to resume.`
+              🕒 Session ended after 30 minutes of inactivity.\n +
+              Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n +
+              If a QR is shown, scan it to resume.
           });
         }
       } catch (err) {
-        console.warn(`[${username}] Failed to send timeout message:`, err.message);
+        console.warn([${username}] Failed to send timeout message:, err.message);
       }
 
       persistUserState(username);
@@ -390,12 +386,11 @@ setInterval(() => {
   const m = process.memoryUsage();
   const rss = (m.rss / 1048576).toFixed(1);
   const heap = (m.heapUsed / 1048576).toFixed(1);
-  console.log(`[mem] rss=${rss}MB heapUsed=${heap}MB`);
+  console.log([mem] rss=${rss}MB heapUsed=${heap}MB);
 }, 120_000);
 
 /* -------------------------------- start ---------------------------------- */
 
 app.listen(PORT, () => {
-  console.log(`🚀 Bot server running on port ${PORT}`);
+  console.log(🚀 Bot server running on port ${PORT});
 });
-EOF
