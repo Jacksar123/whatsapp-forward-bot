@@ -1,7 +1,9 @@
+cp routes/quick-actions.js routes/quick-actions.backup.$(date +%s).js
+
+cat > routes/quick-actions.js <<'EOF'
 const express = require("express");
 const fs = require("fs-extra");
-const path = require("path");
-const { readJSON, writeJSON, getUserPaths } = require("../lib/utils");
+const { readJSON, writeJSONAtomic, getUserPaths } = require("../lib/utils");
 
 module.exports = (USERS) => {
   const router = express.Router();
@@ -53,7 +55,7 @@ module.exports = (USERS) => {
       const unique = new Set([...groupData[category], ...groups]);
       groupData[category] = Array.from(unique);
 
-      writeJSON(paths.categories, groupData);
+      writeJSONAtomic(paths.categories, groupData);
 
       if (USERS[username]) {
         USERS[username].categories = groupData;
@@ -69,3 +71,4 @@ module.exports = (USERS) => {
 
   return router;
 };
+EOF

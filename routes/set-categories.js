@@ -1,5 +1,8 @@
+cp routes/set-categories.js routes/set-categories.backup.$(date +%s).js
+
+cat > routes/set-categories.js <<'EOF'
 const express = require("express");
-const { writeJSON, getUserPaths } = require("../lib/utils");
+const { writeJSONAtomic, getUserPaths } = require("../lib/utils");
 
 const router = express.Router();
 
@@ -16,10 +19,10 @@ module.exports = (USERS) => {
     // ✅ Save to memory (if online)
     if (user) user.categories = incoming;
 
-    // ✅ Persist to disk
+    // ✅ Persist to disk atomically
     try {
-      writeJSON(paths.categories, incoming);
-      console.log(`[${username}] ✅ categories.json overwritten`);
+      writeJSONAtomic(paths.categories, incoming);
+      console.log(`[${username}] ✅ categories.json overwritten atomically`);
     } catch (err) {
       console.error(`[${username}] ❌ Failed to write categories.json:`, err.message);
       return res.status(500).json({ error: "Failed to save categories" });
@@ -46,3 +49,4 @@ module.exports = (USERS) => {
 
   return router;
 };
+EOF

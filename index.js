@@ -1,3 +1,6 @@
+cp index.js index.backup.$(date +%s).js
+
+cat > index.js <<'EOF'
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
@@ -16,7 +19,7 @@ const {
 const {
   ensureDir,
   getUserPaths,
-  writeJSON,
+  writeJSONAtomic,
   readJSON
 } = require("./lib/utils");
 
@@ -52,8 +55,8 @@ function persistUserState(username) {
   if (!u) return;
   try {
     const paths = getUserPaths(username);
-    writeJSON(paths.categories, u.categories || {});
-    writeJSON(paths.groups, u.allGroups || {});
+    writeJSONAtomic(paths.categories, u.categories || {});
+    writeJSONAtomic(paths.groups, u.allGroups || {});
     console.log(`[persist] Saved categories & groups for ${username}`);
   } catch (err) {
     console.warn(`[persist] Failed to save state for ${username}:`, err.message);
@@ -313,7 +316,8 @@ app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
 
-const usersDirPath = path.join(__dirname, "users");
+// Respect DATA_DIR for rehydrate
+const usersDirPath = process.env.DATA_DIR || path.join(__dirname, "users");
 if (fs.existsSync(usersDirPath)) {
   const userDirs = fs.readdirSync(usersDirPath);
   for (const username of userDirs) {
@@ -394,3 +398,4 @@ setInterval(() => {
 app.listen(PORT, () => {
   console.log(`🚀 Bot server running on port ${PORT}`);
 });
+EOF
