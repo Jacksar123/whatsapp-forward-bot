@@ -27,9 +27,12 @@ const {
 
 const { cleanupOldMedia } = require("./cleanup");
 
+// === Supabase state helpers ===
+const { loadUserState, saveUserState } = require("./lib/state");
+
 /* ----------------------------- config ----------------------------------- */
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const USERS = {};
@@ -47,31 +50,56 @@ function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
 }
 
+/**
+ * Persist user state primarily to Supabase (authoritative),
+ * and also mirror to disk as a lightweight backup (non-authoritative).
+ */
 function persistUserState(username) {
   const u = USERS[username];
   if (!u) return;
   try {
+    // Supabase (authoritative)
+    saveUserState(username, u.categories || {}, u.allGroups || {});
+  } catch (err) {
+    console.warn(`[persist] Supabase save failed for ${username}: ${err.message}`);
+  }
+  try {
+    // Local mirror (optional)
     const paths = getUserPaths(username);
     writeJSON(paths.categories, u.categories || {});
     writeJSON(paths.groups, u.allGroups || {});
     console.log(`[persist] Saved categories & groups for ${username}`);
   } catch (err) {
-    console.warn(`[persist] Failed to save state for ${username}: ${err.message}`);
+    console.warn(`[persist] Disk mirror failed for ${username}: ${err.message}`);
   }
 }
 
 function endUserSession(username) {
   const u = USERS[username];
-  if (!u || !u.sock || u.ended) return;
+  if (!u || u.ended) return;
 
-  // save before ending
+  // persist before ending
   persistUserState(username);
   console.log(`[server] Ending session: ${username}`);
   u.ended = true;
 
   try {
-    if (u.sock?.ws?._socket?.readable) {
-      u.sock.end();
+    // Clear any pending interaction timers
+    if (u.categoryTimeout) {
+      clearTimeout(u.categoryTimeout);
+      u.categoryTimeout = null;
+    }
+
+    // Detach event listeners safely
+    if (u.sock?.ev?.removeAllListeners) {
+      try { u.sock.ev.removeAllListeners("messages.upsert"); } catch {}
+      try { u.sock.ev.removeAllListeners("connection.update"); } catch {}
+      try { u.sock.ev.removeAllListeners("creds.update"); } catch {}
+    }
+
+    // Close WS (Baileys)
+    if (u.sock?.ws?.close) {
+      u.sock.ws.close();
     }
   } catch (err) {
     console.warn(`[server] Error ending session: ${err.message}`);
@@ -82,6 +110,7 @@ function endUserSession(username) {
 
 function bindEventListeners(sock, username) {
   sock.ev.on("messages.upsert", async ({ messages }) => {
+    if (!USERS[username]) return; // guard if ended mid-flight
     USERS[username].lastActive = Date.now();
     for (const msg of messages) {
       try {
@@ -165,7 +194,7 @@ function bindEventListeners(sock, username) {
       u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
 
-      // scan & categorise, then persist
+      // (Re)scan & categorise to pick up new groups; then persist
       await autoScanAndCategorise(sock, username, USERS);
       persistUserState(username);
 
@@ -181,37 +210,58 @@ function bindEventListeners(sock, username) {
     }
   });
 
+  sock.ev.on("creds.update", async () => {
+    try {
+      const u = USERS[username];
+      if (u?.saveCredsFn) await u.saveCredsFn();
+    } catch (e) {
+      console.warn(`[${username}] creds.update save failed: ${e.message}`);
+    }
+  });
+
   console.log(`[${username}] ✅ Event listeners bound`);
 }
 
 async function startUserSession(username) {
-  // Only allow 1 active session at a time
-  for (const other of Object.keys(USERS)) {
-    if (other !== username) endUserSession(other);
+  // Idempotent + simple concurrency guard
+  const existing = USERS[username];
+  if (existing?.sock && existing.connected && !existing.ended) {
+    return existing;
   }
+  if (existing?.restarting) return existing;
+  USERS[username] = { ...(existing || {}), restarting: true };
 
   const paths = getUserPaths(username);
   ensureDir(paths.base);
 
-  // rehydrate from disk so categories/groups exist pre-QR
-  const savedCategories = readJSON(paths.categories, {});
-  const savedGroups = readJSON(paths.groups, {});
+  // --- Supabase-first rehydrate (with disk fallback) ---
+  let persisted = {};
+  try {
+    persisted = await loadUserState(username);
+  } catch (e) {
+    console.warn(`[rehydrate] Supabase load failed for ${username}: ${e.message}`);
+  }
+  const savedCategories = (persisted && persisted.categories) || readJSON(paths.categories, {});
+  const savedGroups = (persisted && persisted.groups) || readJSON(paths.groups, {});
 
   USERS[username] = {
+    ...(USERS[username] || {}),
     sock: null,
     qr: null,
-    categories: savedCategories,
-    allGroups: savedGroups,
+    categories: savedCategories,    // { [category]: [groupJids...] }
+    allGroups: savedGroups,         // { [jid]: { id, name } }
     pendingImage: null,
     lastPromptChat: null,
     ended: false,
     connected: false,
-    restarting: false,
+    restarting: true,
     lastActive: Date.now(),
     lastQrAt: 0,
     qrAttempts: 0,
     qrPausedUntil: 0,
-    reconnectDelay: RECONNECT_BASE_MS
+    reconnectDelay: RECONNECT_BASE_MS,
+    categoryTimeout: null,
+    needsReconnect: false,
   };
 
   const logger = P({ level: "silent" });
@@ -229,10 +279,12 @@ async function startUserSession(username) {
   });
 
   USERS[username].sock = sock;
+  USERS[username].saveCredsFn = saveCreds;
 
   sock.ev.on("creds.update", saveCreds);
   bindEventListeners(sock, username);
 
+  USERS[username].restarting = false;
   return USERS[username];
 }
 
@@ -289,12 +341,21 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// Return QR code for client
+// Return QR code for client (with pause status)
 app.get("/get-qr/:username", (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
 
   if (!u) return res.status(404).json({ error: "User not found" });
+
+  const now = Date.now();
+  if (u.qrPausedUntil && now < u.qrPausedUntil) {
+    return res.status(429).json({
+      message: "QR temporarily paused",
+      pausedUntil: u.qrPausedUntil,
+      retryAfterMs: u.qrPausedUntil - now
+    });
+  }
   if (!u.qr) return res.status(202).json({ message: "QR not ready yet" });
 
   return res.status(200).json({ qr: u.qr });
@@ -308,11 +369,49 @@ app.get("/connection-status/:username", (req, res) => {
   return res.json({ connected: !!user.connected, needsReconnect: !!user.needsReconnect });
 });
 
+// QR status for UI
+app.get("/qr-status/:username", (req, res) => {
+  const u = USERS[req.params.username];
+  if (!u) return res.status(404).json({ error: "User not found" });
+  const now = Date.now();
+  res.json({
+    qrReady: !!u.qr,
+    qrAttempts: u.qrAttempts || 0,
+    pausedUntil: u.qrPausedUntil || 0,
+    pausedForMs: u.qrPausedUntil && u.qrPausedUntil > now ? (u.qrPausedUntil - now) : 0
+  });
+});
+
+// Allow frontend to reset QR pause / attempts
+app.post("/reset-qr/:username", (req, res) => {
+  const u = USERS[req.params.username];
+  if (!u) return res.status(404).json({ error: "User not found" });
+  u.qr = null;
+  u.qrAttempts = 0;
+  u.qrPausedUntil = 0;
+  return res.json({ ok: true });
+});
+
+// Optional: debug persisted state quickly
+app.get("/debug/state/:username", async (req, res) => {
+  try {
+    const data = await loadUserState(req.params.username);
+    return res.json({ username: req.params.username, ...data });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "failed" });
+  }
+});
+
 // Health check
 app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
-
+/**
+ * File-based boot rehydrate kept as a no-op safety net.
+ * With Supabase in place, you usually won't need this,
+ * but it preserves prior on-disk sessions if present.
+ */
 const usersDirPath = path.join(__dirname, "users");
 if (fs.existsSync(usersDirPath)) {
   const userDirs = fs.readdirSync(usersDirPath);
@@ -335,7 +434,9 @@ if (fs.existsSync(usersDirPath)) {
       lastQrAt: 0,
       qrAttempts: 0,
       qrPausedUntil: 0,
-      reconnectDelay: RECONNECT_BASE_MS
+      reconnectDelay: RECONNECT_BASE_MS,
+      categoryTimeout: null,
+      needsReconnect: false,
     };
 
     console.log(`[INIT] Rehydrated ${username}`);
@@ -358,8 +459,9 @@ setInterval(() => {
 
   for (const username in USERS) {
     const user = USERS[username];
+    if (!user || user.ended) continue;
 
-    if (user.connected && !user.ended && now - user.lastActive > SESSION_TIMEOUT_MS) {
+    if (user.connected && now - user.lastActive > SESSION_TIMEOUT_MS) {
       console.log(`[TIMEOUT] Ending session for ${username} due to inactivity.`);
 
       try {
@@ -373,6 +475,12 @@ setInterval(() => {
         }
       } catch (err) {
         console.warn(`[${username}] Failed to send timeout message: ${err.message}`);
+      }
+
+      // Clear any interaction timer to avoid stray sends
+      if (user.categoryTimeout) {
+        clearTimeout(user.categoryTimeout);
+        user.categoryTimeout = null;
       }
 
       persistUserState(username);
@@ -391,6 +499,6 @@ setInterval(() => {
 
 /* -------------------------------- start ---------------------------------- */
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Bot server running on port ${PORT}`);
 });
