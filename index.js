@@ -2,7 +2,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
-const cors = require("cors"); // (import ok even if using custom CORS)
+const cors = require("cors");
 const P = require("pino");
 
 const {
@@ -26,8 +26,6 @@ const {
 } = require("./lib/broadcast");
 
 const { cleanupOldMedia } = require("./cleanup");
-
-// === Supabase state helpers ===
 const { loadUserState, saveUserState } = require("./lib/state");
 
 /* ----------------------------- config ----------------------------------- */
@@ -38,9 +36,9 @@ const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const USERS = {};
 
 // QR / reconnect tuning
-const QR_DEBOUNCE_MS = 15_000;  // ignore QR updates within 15s
-const MAX_QR_ATTEMPTS = 6;      // stop after 6 unscanned QRs
-const QR_PAUSE_MS = 2 * 60_000; // pause 2 minutes if attempts exceeded
+const QR_DEBOUNCE_MS = 15_000;   // ignore QR updates within 15s
+const MAX_QR_ATTEMPTS = 6;       // stop after 6 unscanned QRs
+const QR_PAUSE_MS = 2 * 60_000;  // pause 2 minutes if attempts exceeded
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 
@@ -50,22 +48,16 @@ function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
 }
 
-/**
- * Persist user state primarily to Supabase (authoritative),
- * and also mirror to disk as a lightweight backup (non-authoritative).
- */
 function persistUserState(username) {
   const u = USERS[username];
   if (!u) return;
   try {
-    // Supabase (authoritative)
-    saveUserState(username, u.categories || {}, u.allGroups || {});
+    saveUserState(username, u.categories || {}, u.allGroups || {}); // Supabase (authoritative, debounced)
   } catch (err) {
     console.warn(`[persist] Supabase save failed for ${username}: ${err.message}`);
   }
   try {
-    // Local mirror (optional)
-    const paths = getUserPaths(username);
+    const paths = getUserPaths(username); // Disk mirror (backup)
     writeJSON(paths.categories, u.categories || {});
     writeJSON(paths.groups, u.allGroups || {});
     console.log(`[persist] Saved categories & groups for ${username}`);
@@ -84,20 +76,17 @@ function endUserSession(username) {
   u.ended = true;
 
   try {
-    // Clear any pending interaction timers
     if (u.categoryTimeout) {
       clearTimeout(u.categoryTimeout);
       u.categoryTimeout = null;
     }
 
-    // Detach event listeners safely
     if (u.sock?.ev?.removeAllListeners) {
       try { u.sock.ev.removeAllListeners("messages.upsert"); } catch {}
       try { u.sock.ev.removeAllListeners("connection.update"); } catch {}
       try { u.sock.ev.removeAllListeners("creds.update"); } catch {}
     }
 
-    // Close WS (Baileys)
     if (u.sock?.ws?.close) {
       u.sock.ws.close();
     }
@@ -157,13 +146,12 @@ function bindEventListeners(sock, username) {
       u.connected = false;
       u.needsReconnect = true;
 
-      // STOP the loop on connectionReplaced (440) or loggedOut
+      // Stop reconnecting on explicit replace or logged out
       if (
         code === DisconnectReason.connectionReplaced ||
         code === DisconnectReason.loggedOut
       ) {
         console.warn(`[${username}] Connection closed (code: ${code}). Not reconnecting.`);
-
         // reset QR counters so frontend can fetch a fresh QR
         u.qr = null;
         u.qrAttempts = 0;
@@ -194,6 +182,9 @@ function bindEventListeners(sock, username) {
       u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
 
+      // default mode for new/rehydrated sessions if absent
+      if (!u.mode) u.mode = 'media';
+
       // (Re)scan & categorise to pick up new groups; then persist
       await autoScanAndCategorise(sock, username, USERS);
       persistUserState(username);
@@ -201,7 +192,12 @@ function bindEventListeners(sock, username) {
       setTimeout(async () => {
         try {
           await sock.sendMessage(sock.user.id, {
-            text: "✅ WhatsApp connected.\nSend an image to begin.\n/help for commands."
+            text:
+              `✅ WhatsApp connected.\n` +
+              `Currently in *${u.mode}* mode.\n` +
+              `Use /text to switch to text mode, /media to return.\n\n` +
+              `Send an image (media mode) or a plain message (text mode) to begin.\n` +
+              `/help for all commands.`
           });
         } catch (err) {
           console.warn(`[${username}] Welcome message failed: ${err.message}`);
@@ -251,6 +247,7 @@ async function startUserSession(username) {
     categories: savedCategories,    // { [category]: [groupJids...] }
     allGroups: savedGroups,         // { [jid]: { id, name } }
     pendingImage: null,
+    pendingText: null,
     lastPromptChat: null,
     ended: false,
     connected: false,
@@ -262,6 +259,7 @@ async function startUserSession(username) {
     reconnectDelay: RECONNECT_BASE_MS,
     categoryTimeout: null,
     needsReconnect: false,
+    mode: (existing && existing.mode) || 'media',
   };
 
   const logger = P({ level: "silent" });
@@ -408,9 +406,9 @@ app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
 /**
- * File-based boot rehydrate kept as a no-op safety net.
- * With Supabase in place, you usually won't need this,
- * but it preserves prior on-disk sessions if present.
+ * File-based boot rehydrate kept as a safety net.
+ * With Supabase in place, cloud is authoritative,
+ * but this preserves prior on-disk sessions if present.
  */
 const usersDirPath = path.join(__dirname, "users");
 if (fs.existsSync(usersDirPath)) {
@@ -426,6 +424,7 @@ if (fs.existsSync(usersDirPath)) {
       categories,
       allGroups,
       pendingImage: null,
+      pendingText: null,
       lastPromptChat: null,
       connected: false,
       ended: true,
@@ -437,6 +436,7 @@ if (fs.existsSync(usersDirPath)) {
       reconnectDelay: RECONNECT_BASE_MS,
       categoryTimeout: null,
       needsReconnect: false,
+      mode: 'media',
     };
 
     console.log(`[INIT] Rehydrated ${username}`);
@@ -453,39 +453,43 @@ setInterval(() => {
 
 cleanupOldMedia(); // once on startup
 
-// Auto-end sessions after inactivity
+// --- Auto-end sessions after 30 minutes of inactivity ---
 setInterval(() => {
   const now = Date.now();
 
   for (const username in USERS) {
-    const user = USERS[username];
-    if (!user || user.ended) continue;
+    const u = USERS[username];
+    if (!u || u.ended || !u.connected) continue;
 
-    if (user.connected && now - user.lastActive > SESSION_TIMEOUT_MS) {
-      console.log(`[TIMEOUT] Ending session for ${username} due to inactivity.`);
+    const idle = now - (u.lastActive || 0);
+    if (idle <= SESSION_TIMEOUT_MS) continue;
 
-      try {
-        if (user.sock) {
-          user.sock.sendMessage(user.sock.user.id, {
-            text:
-              `🕒 Session ended after 30 minutes of inactivity.\n` +
-              `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
-              `If a QR is shown, scan it to resume.`
-          });
-        }
-      } catch (err) {
-        console.warn(`[${username}] Failed to send timeout message: ${err.message}`);
+    console.log(`[TIMEOUT] Ending session for ${username} after ${Math.round(idle/60000)} min idle`);
+
+    // Best-effort notification before closing the socket
+    try {
+      if (u.sock?.user?.id) {
+        u.sock.sendMessage(u.sock.user.id, {
+          text:
+            `🕒 Session paused due to 30 minutes of inactivity.\n` +
+            `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
+            `If a QR is shown, scan it to resume.`
+        }).catch(() => {});
       }
+    } catch {}
 
-      // Clear any interaction timer to avoid stray sends
-      if (user.categoryTimeout) {
-        clearTimeout(user.categoryTimeout);
-        user.categoryTimeout = null;
-      }
-
-      persistUserState(username);
-      endUserSession(username);
+    // Stop any pending category selection timers
+    if (u.categoryTimeout) {
+      clearTimeout(u.categoryTimeout);
+      u.categoryTimeout = null;
     }
+
+    // Mark so UI can show "needs reconnect"
+    u.needsReconnect = true;
+
+    // Persist state then end the session (closes WS, removes listeners)
+    persistUserState(username);
+    endUserSession(username);
   }
 }, 60 * 1000);
 
@@ -499,6 +503,8 @@ setInterval(() => {
 
 /* -------------------------------- start ---------------------------------- */
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Bot server running on port ${PORT}`);
+const appPort = PORT;
+const host = "0.0.0.0";
+app.listen(appPort, host, () => {
+  console.log(`🚀 Bot server running on port ${appPort}`);
 });
