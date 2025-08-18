@@ -1,3 +1,4 @@
+// index.js
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
@@ -52,7 +53,7 @@ function persistUserState(username) {
   const u = USERS[username];
   if (!u) return;
   try {
-    saveUserState(username, u.categories || {}, u.allGroups || {}); // Supabase (authoritative, debounced)
+    saveUserState(username, u.categories || {}, u.allGroups || {}); // Supabase (authoritative)
   } catch (err) {
     console.warn(`[persist] Supabase save failed for ${username}: ${err.message}`);
   }
@@ -143,20 +144,23 @@ function bindEventListeners(sock, username) {
         lastDisconnect?.error?.reason ||
         0;
 
+      // mark socket closed so no sends occur
+      USERS[username].IS_OPEN = false;
+
       u.connected = false;
       u.needsReconnect = true;
 
-      // Stop reconnecting on explicit replace or logged out
-      if (
+      const isLoggedOut =
+        code === DisconnectReason.loggedOut ||
         code === DisconnectReason.connectionReplaced ||
-        code === DisconnectReason.loggedOut
-      ) {
+        // some builds surface 440 “Connection Closed” for permanent closes
+        (code === 440 && /Connection Closed/i.test(lastDisconnect?.error?.message || ""));
+
+      if (isLoggedOut) {
+        USERS[username].SHOULD_RUN = false; // permanent stop
         console.warn(`[${username}] Connection closed (code: ${code}). Not reconnecting.`);
         // reset QR counters so frontend can fetch a fresh QR
-        u.qr = null;
-        u.qrAttempts = 0;
-        u.qrPausedUntil = 0;
-        u.reconnectDelay = RECONNECT_BASE_MS;
+        u.qr = null; u.qrAttempts = 0; u.qrPausedUntil = 0; u.reconnectDelay = RECONNECT_BASE_MS;
         return;
       }
 
@@ -169,7 +173,7 @@ function bindEventListeners(sock, username) {
       console.warn(
         `[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`
       );
-      setTimeout(() => startUserSession(username), u.reconnectDelay);
+      setTimeout(() => startUserSession(username).catch(() => {}), u.reconnectDelay);
     }
 
     if (connection === "open") {
@@ -182,6 +186,10 @@ function bindEventListeners(sock, username) {
       u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
 
+      // mark socket healthy
+      USERS[username].IS_OPEN = true;
+      USERS[username].SHOULD_RUN = true;
+
       // default mode for new/rehydrated sessions if absent
       if (!u.mode) u.mode = 'media';
 
@@ -191,7 +199,7 @@ function bindEventListeners(sock, username) {
 
       setTimeout(async () => {
         try {
-          await sock.sendMessage(sock.user.id, {
+          await sock.safeSend(sock.user.id, {
             text:
               `✅ WhatsApp connected.\n` +
               `Currently in *${u.mode}* mode.\n` +
@@ -260,6 +268,8 @@ async function startUserSession(username) {
     categoryTimeout: null,
     needsReconnect: false,
     mode: (existing && existing.mode) || 'media',
+    IS_OPEN: false,
+    SHOULD_RUN: true
   };
 
   const logger = P({ level: "silent" });
@@ -273,8 +283,25 @@ async function startUserSession(username) {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    browser: ["Ubuntu", "Chrome", "20.04"]
+    browser: ["Ubuntu", "Chrome", "20.04"],
+    printQRInTerminal: false
   });
+
+  // ---- health flags per user ----
+  USERS[username].IS_OPEN = false;
+  USERS[username].SHOULD_RUN = true;
+
+  // ---- safe send wrapper: never send if closed; swallow mid-flight closes ----
+  sock.safeSend = async (jid, content, opts = {}) => {
+    const U = USERS[username];
+    if (!U?.IS_OPEN || !U?.SHOULD_RUN) throw new Error('SOCKET_NOT_OPEN');
+    try {
+      return await sock.sendMessage(jid, content, opts);
+    } catch (err) {
+      if (/Connection Closed|SOCKET_NOT_OPEN/i.test(err?.message)) return;
+      throw err;
+    }
+  };
 
   USERS[username].sock = sock;
   USERS[username].saveCredsFn = saveCreds;
@@ -437,6 +464,8 @@ if (fs.existsSync(usersDirPath)) {
       categoryTimeout: null,
       needsReconnect: false,
       mode: 'media',
+      IS_OPEN: false,
+      SHOULD_RUN: true
     };
 
     console.log(`[INIT] Rehydrated ${username}`);
@@ -469,7 +498,7 @@ setInterval(() => {
     // Best-effort notification before closing the socket
     try {
       if (u.sock?.user?.id) {
-        u.sock.sendMessage(u.sock.user.id, {
+        u.sock.safeSend(u.sock.user.id, {
           text:
             `🕒 Session paused due to 30 minutes of inactivity.\n` +
             `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
