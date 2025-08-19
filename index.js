@@ -119,9 +119,7 @@ function bindEventListeners(sock, username) {
           u.qrAttempts = (u.qrAttempts || 0) + 1;
           console.log(`[${username}] 🔄 QR code generated (attempt ${u.qrAttempts})`);
           if (u.qrAttempts > MAX_QR_ATTEMPTS) {
-            console.warn(
-              `[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s`
-            );
+            console.warn(`[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s`);
             u.qr = null;
             u.qrPausedUntil = now + QR_PAUSE_MS;
           }
@@ -153,19 +151,19 @@ function bindEventListeners(sock, username) {
 
       if (isLoggedOut) {
         USERS[username].SHOULD_RUN = false;
-        console.warn(`[${username}] Connection closed (code: ${code}). Not reconnecting.`);
+        console.warn(`[${username}] Connection closed permanently (code: ${code}). Not reconnecting.`);
         u.qr = null; u.qrAttempts = 0; u.qrPausedUntil = 0; u.reconnectDelay = RECONNECT_BASE_MS;
+        endUserSession(username);
         return;
       }
 
+      // Retry reconnect
       u.reconnectDelay = Math.min(
         Math.max(u.reconnectDelay || RECONNECT_BASE_MS, RECONNECT_BASE_MS) * 2,
         RECONNECT_MAX_MS
       );
 
-      console.warn(
-        `[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`
-      );
+      console.warn(`[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`);
       setTimeout(() => startUserSession(username).catch(() => {}), u.reconnectDelay);
     }
 
@@ -321,22 +319,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// ADMIN ROUTE GUARD
-app.use("/admin", (req, res, next) => {
-  const token = req.headers["authorization"];
-  if (token !== process.env.ADMIN_SECRET) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-});
-
 // ROUTES
 app.use("/quick-actions", require("./routes/quick-actions")(USERS));
 app.use("/get-categories", require("./routes/get-categories")(USERS));
 app.use("/set-categories", require("./routes/set-categories")(USERS));
 app.use("/admin", require("./routes/admin")(USERS, startUserSession, endUserSession));
 
-// Create user session
 app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -352,7 +340,6 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// Return QR code
 app.get("/get-qr/:username", (req, res) => {
   const { username } = req.params;
   const u = USERS[username];
@@ -365,13 +352,12 @@ app.get("/get-qr/:username", (req, res) => {
       pausedUntil: u.qrPausedUntil,
       retryAfterMs: u.qrPausedUntil - now
     });
-    }
+  }
   if (!u.qr) return res.status(202).json({ message: "QR not ready yet" });
 
   return res.status(200).json({ qr: u.qr });
 });
 
-// Connection status
 app.get("/connection-status/:username", (req, res) => {
   const { username } = req.params;
   const user = USERS[username];
@@ -379,7 +365,6 @@ app.get("/connection-status/:username", (req, res) => {
   return res.json({ connected: !!user.connected, needsReconnect: !!user.needsReconnect });
 });
 
-// QR status
 app.get("/qr-status/:username", (req, res) => {
   const u = USERS[req.params.username];
   if (!u) return res.status(404).json({ error: "User not found" });
@@ -392,7 +377,6 @@ app.get("/qr-status/:username", (req, res) => {
   });
 });
 
-// Reset QR throttle
 app.post("/reset-qr/:username", (req, res) => {
   const u = USERS[req.params.username];
   if (!u) return res.status(404).json({ error: "User not found" });
@@ -402,7 +386,6 @@ app.post("/reset-qr/:username", (req, res) => {
   return res.json({ ok: true });
 });
 
-// Debug persisted state
 app.get("/debug/state/:username", async (req, res) => {
   try {
     const data = await loadUserState(req.params.username);
@@ -413,7 +396,6 @@ app.get("/debug/state/:username", async (req, res) => {
   }
 });
 
-// Health
 app.get("/health", (_, res) => res.send("OK"));
 
 /* --------------------------- boot rehydrate ------------------------------ */
@@ -471,7 +453,7 @@ setInterval(() => {
       if (u.sock?.user?.id) {
         u.sock.safeSend(u.sock.user.id, {
           text:
-            `🕒 Session paused due to 30 minutes of inactivity.\n` +
+            `🕒 Session paused due to inactivity.\n` +
             `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
             `If a QR is shown, scan it to resume.`
         }).catch(() => {});
