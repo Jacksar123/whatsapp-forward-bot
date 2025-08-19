@@ -3,7 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
-const cors = require("cors");
+// const cors = require("cors"); // not used (you set headers manually)
 const P = require("pino");
 
 const {
@@ -254,7 +254,7 @@ async function startUserSession(username) {
     qr: null,
     categories: savedCategories,    // { [category]: [groupJids...] }
     allGroups: savedGroups,         // { [jid]: { id, name } }
-    pendingImage: null,
+    pendingImage: null,             // legacy fields kept for safety
     pendingText: null,
     lastPromptChat: null,
     ended: false,
@@ -318,6 +318,7 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json());
 
+// You already set CORS headers manually below
 const allowedOrigins = [
   "https://whats-broadcast-hub.lovable.app",
   "https://preview--whats-broadcast-hub.lovable.app"
@@ -474,7 +475,7 @@ if (fs.existsSync(usersDirPath)) {
 
 /* ---------------------- background maintenance --------------------------- */
 
-// Media cleanup every 6 hours
+// Media cleanup every 6 hours (harmless now that media is in-memory)
 setInterval(() => {
   console.log("🧹 Starting media cleanup...");
   cleanupOldMedia();
