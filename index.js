@@ -3,6 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
+const cors = require("cors");
 const P = require("pino");
 
 const {
@@ -26,238 +27,237 @@ const {
 } = require("./lib/broadcast");
 
 const { cleanupOldMedia } = require("./cleanup");
-const { loadUserState, saveUserState } = require("./lib/state");
+const { loadUserState, saveUserState, notifyFrontend, getFrontendStatus } = require("./lib/state");
 
-/* ----------------------------- config ----------------------------------- */
+/* -------------------------------- config -------------------------------- */
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const HOST = "0.0.0.0";
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30min idle
 const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
-const USERS = {};
 
 // QR / reconnect tuning
-const QR_DEBOUNCE_MS = 15_000;
-const MAX_QR_ATTEMPTS = 6;
-const QR_PAUSE_MS = 2 * 60_000;
+const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
+const MAX_QR_ATTEMPTS = 6;         // then pause QR for a bit
+const QR_PAUSE_MS = 2 * 60_000;    // 2 minutes
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 
-/* ----------------------------- helpers ---------------------------------- */
+// CORS
+const allowedOrigins = [
+  "https://whats-broadcast-hub.lovable.app",
+  "https://preview--whats-broadcast-hub.lovable.app"
+];
+
+/* --------------------------- global in-memory ---------------------------- */
+
+const USERS = global.USERS || (global.USERS = {});
+// USERS[username] = {
+//   sock, socketActive, connecting, ended,
+//   lastOpenAt, lastActive,
+//   categories, allGroups,
+//   pendingImage, pendingText, lastPromptChat,
+//   mode, // 'media' | 'text'
+//   lastQR, qrTs, lastQrAt, qrAttempts, qrPausedUntil,
+//   reconnectDelay,
+//   readyForHeavyTasks,
+//   ownerJid,
+//   saveCredsFn,
+// }
+
+/* ------------------------------- helpers -------------------------------- */
+
+function logMem() {
+  const m = process.memoryUsage();
+  const rss = (m.rss / 1048576).toFixed(1);
+  const heap = (m.heapUsed / 1048576).toFixed(1);
+  console.log(`[mem] rss=${rss}MB heapUsed=${heap}MB`);
+}
 
 function generateUsername() {
   return `user_${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function persistUserState(username) {
+function mirrorToDisk(username) {
   const u = USERS[username];
   if (!u) return;
-  try {
-    saveUserState(username, u.categories || {}, u.allGroups || {});
-  } catch (err) {
-    console.warn(`[persist] Supabase save failed for ${username}: ${err.message}`);
-  }
   try {
     const paths = getUserPaths(username);
     writeJSON(paths.categories, u.categories || {});
     writeJSON(paths.groups, u.allGroups || {});
-    console.log(`[persist] Saved categories & groups for ${username}`);
-  } catch (err) {
-    console.warn(`[persist] Disk mirror failed for ${username}: ${err.message}`);
+    console.log(`[persist] Disk mirror saved for ${username}`);
+  } catch (e) {
+    console.warn(`[persist] Disk mirror failed for ${username}: ${e.message}`);
   }
 }
 
-function endUserSession(username) {
+async function persistUserState(username) {
   const u = USERS[username];
-  if (!u || u.ended) return;
-
-  persistUserState(username);
-  console.log(`[server] Ending session: ${username}`);
-  u.ended = true;
-
+  if (!u) return;
   try {
-    if (u.categoryTimeout) {
-      clearTimeout(u.categoryTimeout);
-      u.categoryTimeout = null;
-    }
-    if (u.sock?.ev?.removeAllListeners) {
-      try { u.sock.ev.removeAllListeners("messages.upsert"); } catch {}
-      try { u.sock.ev.removeAllListeners("connection.update"); } catch {}
-      try { u.sock.ev.removeAllListeners("creds.update"); } catch {}
-    }
-    if (u.sock?.ws?.close) {
-      u.sock.ws.close();
-    }
-  } catch (err) {
-    console.warn(`[server] Error ending session: ${err.message}`);
+    await saveUserState(username, u.categories || {}, u.allGroups || {});
+  } catch (e) {
+    console.warn(`[persist] Supabase save failed for ${username}: ${e.message}`);
   }
-
-  delete USERS[username];
+  mirrorToDisk(username);
 }
+
+async function endSession(u = {}) {
+  try { await u.sock?.ws?.close(); } catch {}
+  try { await u.sock?.end?.(); } catch {}
+  u.sock = null;
+  u.socketActive = false;
+  u.connecting = false;
+  u.readyForHeavyTasks = false;
+}
+
+/* ------------------------------ event binder ---------------------------- */
 
 function bindEventListeners(sock, username) {
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    if (!USERS[username]) return;
-    USERS[username].lastActive = Date.now();
-    for (const msg of messages) {
-      try {
-        await handleBroadcastMessage(username, msg, USERS);
-      } catch (err) {
-        console.error(`[${username}] Message error:`, err);
-      }
+  const u = USERS[username];
+
+  // creds persistence
+  sock.ev.on("creds.update", async () => {
+    try { await u.saveCredsFn?.(); } catch (e) {
+      console.warn(`[${username}] creds.update save failed: ${e.message}`);
     }
   });
 
-  sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
-    const u = USERS[username] || (USERS[username] = {});
+  // connection lifecycle
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
+    // Controlled QR surfacing
     if (qr) {
       if (!(u.qrPausedUntil && now < u.qrPausedUntil)) {
         if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
           u.lastQrAt = now;
-          u.qr = qr;
+          u.lastQR = qr;
+          u.qrTs = now;
           u.qrAttempts = (u.qrAttempts || 0) + 1;
-          console.log(`[${username}] 🔄 QR code generated (attempt ${u.qrAttempts})`);
+          notifyFrontend(username, { qrAvailable: true });
+          console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
           if (u.qrAttempts > MAX_QR_ATTEMPTS) {
-            console.warn(`[${username}] QR attempts exceeded. Pausing QR regen for ${(QR_PAUSE_MS / 1000) | 0}s`);
-            u.qr = null;
+            console.warn(`[${username}] QR attempts exceeded. Pausing QR for ${QR_PAUSE_MS/1000}s`);
+            u.lastQR = null;
             u.qrPausedUntil = now + QR_PAUSE_MS;
           }
         }
       }
     }
 
-    if (connection === "close") {
-      persistUserState(username);
-
-      const err = lastDisconnect?.error;
-      const code =
-        err?.output?.statusCode ??
-        err?.statusCode ??
-        err?.reason ??
-        (typeof err === 'number' ? err : 0);
-      const msg = err?.message || String(err || '');
-
-      USERS[username].IS_OPEN = false;
-      u.connected = false;
-      u.needsReconnect = true;
-
-      // 🔧 FIXED: 440 no longer treated as permanent logout
-      const isLoggedOut =
-        code === DisconnectReason.loggedOut ||
-        code === DisconnectReason.connectionReplaced;
-
-      console.warn(`[${username}] Connection closed: code=${code} message=${msg}`);
-
-      if (isLoggedOut) {
-        USERS[username].SHOULD_RUN = false;
-        console.warn(`[${username}] Connection closed permanently (code: ${code}). Not reconnecting.`);
-        u.qr = null; u.qrAttempts = 0; u.qrPausedUntil = 0; u.reconnectDelay = RECONNECT_BASE_MS;
-        endUserSession(username);
-        return;
-      }
-
-      // Retry reconnect
-      u.reconnectDelay = Math.min(
-        Math.max(u.reconnectDelay || RECONNECT_BASE_MS, RECONNECT_BASE_MS) * 2,
-        RECONNECT_MAX_MS
-      );
-
-      console.warn(`[${username}] Connection closed (code: ${code}). Reconnect in ${u.reconnectDelay}ms`);
-      setTimeout(() => startUserSession(username).catch(() => {}), u.reconnectDelay);
-    }
-
     if (connection === "open") {
-      console.log(`[${username}] ✅ Connected to WhatsApp`);
-      u.connected = true;
-      u.needsReconnect = false;
+      u.socketActive = true;
+      u.connecting = false;
+      u.ended = false;
+      u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
-      u.qr = null;
-      u.qrAttempts = 0;
-      u.qrPausedUntil = 0;
+      u.ownerJid = sock?.user?.id || u.ownerJid;
+      u.lastQR = null; u.qrAttempts = 0; u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
+      notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
-      USERS[username].IS_OPEN = true;
-      USERS[username].SHOULD_RUN = true;
-
-      if (!u.mode) u.mode = 'media';
-
-      await autoScanAndCategorise(sock, username, USERS);
-      persistUserState(username);
-
+      // Defer heavy tasks
       setTimeout(async () => {
         try {
-          await sock.safeSend(sock.user.id, {
-            text:
-              `✅ WhatsApp connected.\n` +
-              `Currently in *${u.mode}* mode.\n` +
-              `Use /text to switch to text mode, /media to return.\n\n` +
-              `Send an image (media mode) or a plain message (text mode) to begin.\n` +
-              `/help for all commands.`
-          });
-        } catch (err) {
-          console.warn(`[${username}] Welcome message failed: ${err.message}`);
+          u.readyForHeavyTasks = true;
+          await autoScanAndCategorise(username, sock);
+          await persistUserState(username);
+        } catch (e) {
+          console.error(`[${username}] autoScan error`, e);
         }
-      }, 2000);
+      }, 15_000);
+    }
+
+    if (connection === "close") {
+      await persistUserState(username);
+
+      const code =
+        lastDisconnect?.error?.output?.statusCode ??
+        lastDisconnect?.error?.statusCode ??
+        lastDisconnect?.output?.statusCode ??
+        lastDisconnect?.reason;
+
+      console.warn(`[${username}] Connection closed: code=${code} message=${lastDisconnect?.error?.message || "n/a"}`);
+
+      await endSession(u);
+
+      switch (code) {
+        case DisconnectReason.connectionReplaced:
+        case 440: // Stream conflict variant
+        case DisconnectReason.loggedOut:
+          notifyFrontend(username, { connected: false, needsRelink: true });
+          // no auto-reconnect; force relink
+          break;
+        case DisconnectReason.restartRequired:
+        case DisconnectReason.timedOut:
+        default:
+          notifyFrontend(username, { connected: false });
+          u.reconnectDelay = Math.min(
+            Math.max(u.reconnectDelay || RECONNECT_BASE_MS, RECONNECT_BASE_MS) * 2,
+            RECONNECT_MAX_MS
+          );
+          setTimeout(() => startUserSession(username).catch(() => {}),
+            5_000 + Math.random() * 10_000);
+      }
     }
   });
 
-  sock.ev.on("creds.update", async () => {
+  // inbound messages (owner-DM gating is inside handleBroadcastMessage)
+  sock.ev.on("messages.upsert", async ({ messages }) => {
     try {
-      const u = USERS[username];
-      if (u?.saveCredsFn) await u.saveCredsFn();
+      u.lastActive = Date.now();
+      for (const msg of messages || []) {
+        await handleBroadcastMessage(username, msg, sock);
+      }
     } catch (e) {
-      console.warn(`[${username}] creds.update save failed: ${e.message}`);
+      console.error(`[${username}] messages.upsert error`, e);
     }
   });
 
   console.log(`[${username}] ✅ Event listeners bound`);
 }
 
+/* ------------------------------ start session --------------------------- */
+
 async function startUserSession(username) {
-  const existing = USERS[username];
-  if (existing?.sock && existing.connected && !existing.ended) {
-    return existing;
-  }
-  if (existing?.restarting) return existing;
-  USERS[username] = { ...(existing || {}), restarting: true };
+  const existing = USERS[username] || (USERS[username] = {});
+  if (existing.socketActive || existing.connecting) return; // singleton
+  existing.connecting = true;
 
   const paths = getUserPaths(username);
-  ensureDir(paths.base);
+  await ensureDir(paths.base);
+  await ensureDir(paths.auth);
+  await ensureDir(paths.data);
+  await ensureDir(paths.media);
 
+  // hydrate categories/groups
   let persisted = {};
-  try {
-    persisted = await loadUserState(username);
-  } catch (e) {
+  try { persisted = await loadUserState(username); } catch (e) {
     console.warn(`[rehydrate] Supabase load failed for ${username}: ${e.message}`);
   }
-  const savedCategories = (persisted && persisted.categories) || readJSON(paths.categories, {});
-  const savedGroups = (persisted && persisted.groups) || readJSON(paths.groups, {});
+  const savedCategories = persisted.categories || readJSON(paths.categories, {});
+  const savedGroups = persisted.groups || readJSON(paths.groups, {});
 
-  USERS[username] = {
-    ...(USERS[username] || {}),
-    sock: null,
-    qr: null,
+  Object.assign(USERS[username], {
     categories: savedCategories,
     allGroups: savedGroups,
     pendingImage: null,
     pendingText: null,
     lastPromptChat: null,
+    mode: existing.mode || "media",
     ended: false,
-    connected: false,
-    restarting: true,
+    socketActive: false,
+    lastOpenAt: 0,
     lastActive: Date.now(),
-    lastQrAt: 0,
-    qrAttempts: 0,
-    qrPausedUntil: 0,
+    lastQR: null, qrTs: 0,
+    lastQrAt: 0, qrAttempts: 0, qrPausedUntil: 0,
     reconnectDelay: RECONNECT_BASE_MS,
-    categoryTimeout: null,
-    needsReconnect: false,
-    mode: (existing && existing.mode) || 'media',
-    IS_OPEN: false,
-    SHOULD_RUN: true
-  };
+    readyForHeavyTasks: false
+  });
 
+  // Baileys boot
   const logger = P({ level: "silent" });
   const { state, saveCreds } = await useMultiFileAuthState(paths.auth);
   const { version } = await fetchLatestBaileysVersion();
@@ -265,20 +265,20 @@ async function startUserSession(username) {
   const sock = makeWASocket({
     version,
     logger,
+    printQRInTerminal: false,
+    browser: ["WhatsBroadcaster", "Chrome", "118"],
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    browser: ["Ubuntu", "Chrome", "20.04"],
-    printQRInTerminal: false
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
   });
 
-  USERS[username].IS_OPEN = false;
-  USERS[username].SHOULD_RUN = true;
-
+  // safe send wrapper (avoid throwing on transient socket close)
   sock.safeSend = async (jid, content, opts = {}) => {
-    const U = USERS[username];
-    if (!U?.IS_OPEN || !U?.SHOULD_RUN) throw new Error('SOCKET_NOT_OPEN');
+    const u = USERS[username];
+    if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
     try {
       return await sock.sendMessage(jid, content, opts);
     } catch (err) {
@@ -287,26 +287,21 @@ async function startUserSession(username) {
     }
   };
 
+  // store on user
   USERS[username].sock = sock;
   USERS[username].saveCredsFn = saveCreds;
 
-  sock.ev.on("creds.update", saveCreds);
+  // bind events
   bindEventListeners(sock, username);
 
-  USERS[username].restarting = false;
-  return USERS[username];
+  USERS[username].connecting = false;
+  console.log(`[INIT] session started for ${username}`);
 }
 
-/* ----------------------------- express ---------------------------------- */
+/* -------------------------------- express -------------------------------- */
 
 const app = express();
-app.use(express.json());
-
-const allowedOrigins = [
-  "https://whats-broadcast-hub.lovable.app",
-  "https://preview--whats-broadcast-hub.lovable.app"
-];
-
+app.use(express.json({ limit: "5mb" }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
@@ -319,12 +314,19 @@ app.use((req, res, next) => {
   next();
 });
 
-// ROUTES
+// feature routes (unchanged API surface)
 app.use("/quick-actions", require("./routes/quick-actions")(USERS));
 app.use("/get-categories", require("./routes/get-categories")(USERS));
 app.use("/set-categories", require("./routes/set-categories")(USERS));
-app.use("/admin", require("./routes/admin")(USERS, startUserSession, endUserSession));
+app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (username) => {
+  const u = USERS[username];
+  if (!u) return;
+  await persistUserState(username);
+  await endSession(u);
+  delete USERS[username];
+}));
 
+// create (or resume) a user session
 app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -334,35 +336,36 @@ app.post("/create-user", async (req, res) => {
     }
     await startUserSession(username);
     res.json({ ok: true, username });
-  } catch (err) {
-    console.error("/create-user failed:", err);
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    console.error("/create-user failed:", e);
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-app.get("/get-qr/:username", (req, res) => {
-  const { username } = req.params;
-  const u = USERS[username];
-  if (!u) return res.status(404).json({ error: "User not found" });
-
-  const now = Date.now();
-  if (u.qrPausedUntil && now < u.qrPausedUntil) {
-    return res.status(429).json({
-      message: "QR temporarily paused",
-      pausedUntil: u.qrPausedUntil,
-      retryAfterMs: u.qrPausedUntil - now
-    });
-  }
-  if (!u.qr) return res.status(202).json({ message: "QR not ready yet" });
-
-  return res.status(200).json({ qr: u.qr });
+// status endpoints
+app.get("/status/:username", (req, res) => {
+  const username = req.params.username;
+  const u = USERS[username] || {};
+  const status = getFrontendStatus(username);
+  res.json({
+    ok: true,
+    connected: !!u.socketActive,
+    connecting: !!u.connecting,
+    needsRelink: !!status.needsRelink,
+    qrAvailable: !!status.qrAvailable,
+    ownerJid: u.ownerJid || null,
+    ts: Date.now()
+  });
 });
 
 app.get("/connection-status/:username", (req, res) => {
-  const { username } = req.params;
-  const user = USERS[username];
-  if (!user) return res.status(404).json({ error: "User not found" });
-  return res.json({ connected: !!user.connected, needsReconnect: !!user.needsReconnect });
+  const u = USERS[req.params.username];
+  if (!u) return res.status(404).json({ error: "User not found" });
+  const status = getFrontendStatus(req.params.username);
+  res.json({
+    connected: !!u.socketActive,
+    needsReconnect: !!status.needsRelink
+  });
 });
 
 app.get("/qr-status/:username", (req, res) => {
@@ -370,7 +373,7 @@ app.get("/qr-status/:username", (req, res) => {
   if (!u) return res.status(404).json({ error: "User not found" });
   const now = Date.now();
   res.json({
-    qrReady: !!u.qr,
+    qrReady: !!u.lastQR,
     qrAttempts: u.qrAttempts || 0,
     pausedUntil: u.qrPausedUntil || 0,
     pausedForMs: u.qrPausedUntil && u.qrPausedUntil > now ? (u.qrPausedUntil - now) : 0
@@ -380,25 +383,34 @@ app.get("/qr-status/:username", (req, res) => {
 app.post("/reset-qr/:username", (req, res) => {
   const u = USERS[req.params.username];
   if (!u) return res.status(404).json({ error: "User not found" });
-  u.qr = null;
+  u.lastQR = null;
   u.qrAttempts = 0;
   u.qrPausedUntil = 0;
-  return res.json({ ok: true });
+  notifyFrontend(req.params.username, { qrAvailable: false });
+  res.json({ ok: true });
 });
 
+// serve the current QR (raw string)
+app.get("/get-qr/:username", (req, res) => {
+  const u = USERS[req.params.username];
+  if (!u?.lastQR) return res.status(404).json({ ok: false, error: "no QR" });
+  res.json({ ok: true, qr: u.lastQR, ts: u.qrTs || Date.now() });
+});
+
+// debug
 app.get("/debug/state/:username", async (req, res) => {
   try {
     const data = await loadUserState(req.params.username);
-    return res.json({ username: req.params.username, ...data });
+    res.json({ username: req.params.username, ...data });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "failed" });
+    res.status(500).json({ error: "failed" });
   }
 });
 
-app.get("/health", (_, res) => res.send("OK"));
+app.get("/health", (_req, res) => res.send("OK"));
 
-/* --------------------------- boot rehydrate ------------------------------ */
+/* ---------------------------- boot rehydrate ---------------------------- */
+
 const usersDirPath = path.join(__dirname, "users");
 if (fs.existsSync(usersDirPath)) {
   const userDirs = fs.readdirSync(usersDirPath);
@@ -408,79 +420,72 @@ if (fs.existsSync(usersDirPath)) {
     const allGroups = readJSON(paths.groups, {});
     USERS[username] = {
       sock: null,
-      qr: null,
+      socketActive: false,
+      connecting: false,
+      ended: true,
+      lastOpenAt: 0,
+      lastActive: Date.now(),
       categories,
       allGroups,
       pendingImage: null,
       pendingText: null,
       lastPromptChat: null,
-      connected: false,
-      ended: true,
-      restarting: false,
-      lastActive: Date.now(),
-      lastQrAt: 0,
-      qrAttempts: 0,
-      qrPausedUntil: 0,
+      mode: "media",
+      lastQR: null, qrTs: 0,
+      lastQrAt: 0, qrAttempts: 0, qrPausedUntil: 0,
       reconnectDelay: RECONNECT_BASE_MS,
-      categoryTimeout: null,
-      needsReconnect: false,
-      mode: 'media',
-      IS_OPEN: false,
-      SHOULD_RUN: true
+      readyForHeavyTasks: false
     };
     console.log(`[INIT] Rehydrated ${username}`);
   }
 }
 
-/* ---------------------- background maintenance --------------------------- */
+/* ------------------------ background maintenance ------------------------ */
+
+// media cleanup (every 6h)
 setInterval(() => {
-  console.log("🧹 Starting media cleanup...");
-  cleanupOldMedia();
+  try { cleanupOldMedia(); } catch (e) { console.error("[cleanup] error", e); }
 }, 6 * 60 * 60 * 1000);
 cleanupOldMedia();
 
+// idle reaper
 setInterval(() => {
   const now = Date.now();
-  for (const username in USERS) {
-    const u = USERS[username];
-    if (!u || u.ended || !u.connected) continue;
-
-    const idle = now - (u.lastActive || 0);
-    if (idle <= SESSION_TIMEOUT_MS) continue;
-
-    console.log(`[TIMEOUT] Ending session for ${username} after ${Math.round(idle/60000)} min idle`);
-    try {
-      if (u.sock?.user?.id) {
-        u.sock.safeSend(u.sock.user.id, {
-          text:
-            `🕒 Session paused due to inactivity.\n` +
-            `Please reconnect on your dashboard:\n${DASHBOARD_URL}\n\n` +
-            `If a QR is shown, scan it to resume.`
-        }).catch(() => {});
-      }
-    } catch {}
-
-    if (u.categoryTimeout) {
-      clearTimeout(u.categoryTimeout);
-      u.categoryTimeout = null;
+  for (const [username, u] of Object.entries(USERS)) {
+    if (!u.socketActive && !u.connecting) continue;
+    const last = u.lastOpenAt || 0;
+    if (last && now - last > SESSION_TIMEOUT_MS) {
+      console.log(`[${username}] idle timeout — ending session`);
+      (async () => {
+        try {
+          if (u.ownerJid) {
+            await u.sock?.safeSend?.(u.ownerJid, {
+              text:
+                `🕒 Session paused due to inactivity.\n` +
+                `Reopen your dashboard to resume:\n${DASHBOARD_URL}`
+            }).catch(() => {});
+          }
+        } catch {}
+        await persistUserState(username);
+        await endSession(u);
+      })();
     }
-
-    u.needsReconnect = true;
-    persistUserState(username);
-    endUserSession(username);
   }
-}, 60 * 1000);
+}, 60_000);
 
-setInterval(() => {
-  const m = process.memoryUsage();
-  const rss = (m.rss / 1048576).toFixed(1);
-  const heap = (m.heapUsed / 1048576).toFixed(1);
-  console.log(`[mem] rss=${rss}MB heapUsed=${heap}MB`);
-}, 120_000);
+// mem logs
+setInterval(logMem, 120_000);
 
-/* -------------------------------- start ---------------------------------- */
-const appPort = PORT;
-const host = "0.0.0.0";
-app.listen(appPort, host, () => {
-  console.log(`🚀 Bot server running on port ${appPort}`);
+/* --------------------------------- start -------------------------------- */
+
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 Bot server running on port ${PORT}`);
+  logMem();
+
+  // Optional: auto-boot a user for testing
+  const BOOT_USER = process.env.BOOT_USER;
+  if (BOOT_USER) {
+    console.log(`[INIT] Rehydrated ${BOOT_USER}`);
+    startUserSession(BOOT_USER).catch((e) => console.error("[boot] startUserSession error", e));
+  }
 });
