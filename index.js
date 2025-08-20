@@ -142,10 +142,10 @@ function bindEventListeners(sock, username) {
       u.connected = false;
       u.needsReconnect = true;
 
+      // 🔧 FIXED: 440 no longer treated as permanent logout
       const isLoggedOut =
         code === DisconnectReason.loggedOut ||
-        code === DisconnectReason.connectionReplaced ||
-        (code === 440 && /Connection Closed/i.test(msg));
+        code === DisconnectReason.connectionReplaced;
 
       console.warn(`[${username}] Connection closed: code=${code} message=${msg}`);
 
