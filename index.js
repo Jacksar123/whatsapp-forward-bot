@@ -38,8 +38,7 @@ const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 
 // QR / reconnect tuning
 const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
-const MAX_QR_ATTEMPTS = 6;         // then pause QR for a bit
-const QR_PAUSE_MS = 2 * 60_000;    // 2 minutes
+const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 
@@ -116,21 +115,17 @@ function bindEventListeners(sock, username) {
     const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
-    // Controlled QR surfacing
+    // Controlled QR surfacing (patched)
     if (qr) {
-      if (!(u.qrPausedUntil && now < u.qrPausedUntil)) {
-        if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
-          u.lastQrAt = now;
-          u.lastQR = qr;
-          u.qrTs = now;
-          u.qrAttempts = (u.qrAttempts || 0) + 1;
-          notifyFrontend(username, { qrAvailable: true });
-          console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
-          if (u.qrAttempts > MAX_QR_ATTEMPTS) {
-            console.warn(`[${username}] QR attempts exceeded. Pausing QR for ${QR_PAUSE_MS/1000}s`);
-            u.lastQR = null;
-            u.qrPausedUntil = now + QR_PAUSE_MS;
-          }
+      if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
+        u.lastQrAt = now;
+        u.lastQR = qr;
+        u.qrTs = now;
+        u.qrAttempts = (u.qrAttempts || 0) + 1;
+        notifyFrontend(username, { qrAvailable: true });
+        console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
+        if (u.qrAttempts > MAX_QR_ATTEMPTS) {
+          console.warn(`[${username}] ⚠️ Many QR attempts without scan (attempts=${u.qrAttempts})`);
         }
       }
     }
@@ -142,7 +137,9 @@ function bindEventListeners(sock, username) {
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
       u.ownerJid = sock?.user?.id || u.ownerJid;
-      u.lastQR = null; u.qrAttempts = 0; u.qrPausedUntil = 0;
+      u.lastQR = null;
+      u.qrAttempts = 0;
+      u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
@@ -175,12 +172,15 @@ function bindEventListeners(sock, username) {
         await endSession(u);
         const paths = getUserPaths(username);
         try { fs.rmSync(paths.auth, { recursive: true, force: true }); } catch {}
-        setTimeout(() => startUserSession(username).catch(() => {}),
-          3000);
+        setTimeout(() => startUserSession(username).catch(() => {}), 3000);
         return;
       }
 
       await endSession(u);
+
+      // reset QR counters on disconnect
+      u.qrAttempts = 0;
+      u.qrPausedUntil = 0;
 
       switch (code) {
         case DisconnectReason.connectionReplaced:
@@ -387,7 +387,10 @@ app.post("/reset-qr/:username", (req, res) => {
 
 app.get("/get-qr/:username", (req, res) => {
   const u = USERS[req.params.username];
-  if (!u?.lastQR) return res.status(404).json({ ok: false, error: "no QR" });
+  if (!u) return res.status(404).json({ error: "User not found" });
+  if (!u.lastQR) {
+    return res.json({ ok: false, error: "QR not available yet", retry: true });
+  }
   res.json({ ok: true, qr: u.lastQR, ts: u.qrTs || Date.now() });
 });
 
