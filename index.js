@@ -40,7 +40,7 @@ const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
 const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
 const RECONNECT_BASE_MS = 3_000;
-const RECONNECT_MAX_MS = 60_000;
+the RECONNECT_MAX_MS = 60_000;
 
 // CORS
 const allowedOrigins = [
@@ -136,14 +136,20 @@ function bindEventListeners(sock, username) {
       u.ended = false;
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
-      u.ownerJid = sock?.user?.id || u.ownerJid;
+
+      // ✅ IMPORTANT: Do NOT set ownerJid to the bot's own JID.
+      // Let broadcast.js learn the true owner from the first inbound DM.
+      if (u.ownerJid && u.ownerJid.endsWith("@s.whatsapp.net") && u.ownerJid === (sock?.user?.id || "")) {
+        u.ownerJid = null; // clear any polluted value so greeting can trigger
+      }
+
       u.lastQR = null;
       u.qrAttempts = 0;
       u.qrPausedUntil = 0;
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
-      // Defer heavy tasks
+      // Defer heavy tasks slightly to avoid race right after open
       setTimeout(async () => {
         try {
           u.readyForHeavyTasks = true;
@@ -164,7 +170,9 @@ function bindEventListeners(sock, username) {
         lastDisconnect?.output?.statusCode ??
         lastDisconnect?.reason;
 
-      console.warn(`[${username}] Connection closed: code=${code} message=${lastDisconnect?.error?.message || "n/a"}`);
+      console.warn(
+        `[${username}] Connection closed: code=${code} message=${lastDisconnect?.error?.message || "n/a"}`
+      );
 
       // Handle Bad MAC explicitly
       if (String(lastDisconnect?.error?.message || "").includes("bad-mac")) {
@@ -196,17 +204,23 @@ function bindEventListeners(sock, username) {
             Math.max(u.reconnectDelay || RECONNECT_BASE_MS, RECONNECT_BASE_MS) * 2,
             RECONNECT_MAX_MS
           );
-          setTimeout(() => startUserSession(username).catch(() => {}),
-            5_000 + Math.random() * 10_000);
+          setTimeout(
+            () => startUserSession(username).catch(() => {}),
+            5_000 + Math.random() * 10_000
+          );
       }
     }
   });
 
-  // inbound messages
-  sock.ev.on("messages.upsert", async ({ messages }) => {
+  // inbound messages → forward ALL to the broadcast handler
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       u.lastActive = Date.now();
       for (const msg of messages || []) {
+        // visibility for debugging
+        const jid = msg?.key?.remoteJid || "";
+        const fromMe = !!msg?.key?.fromMe;
+        console.log(`[${username}] upsert type=${type} fromMe=${fromMe} jid=${jid}`);
         await handleBroadcastMessage(username, msg, sock);
       }
     } catch (e) {
@@ -273,6 +287,7 @@ async function startUserSession(username) {
     generateHighQualityLinkPreview: false,
   });
 
+  // convenience wrapper with mild error swallowing for closed sockets
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
