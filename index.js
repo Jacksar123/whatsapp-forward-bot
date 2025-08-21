@@ -137,10 +137,27 @@ function bindEventListeners(sock, username) {
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
 
-      // ✅ IMPORTANT: Do NOT set ownerJid to the bot's own JID.
-      // Let broadcast.js learn the true owner from the first inbound DM.
-      if (u.ownerJid && u.ownerJid.endsWith("@s.whatsapp.net") && u.ownerJid === (sock?.user?.id || "")) {
-        u.ownerJid = null; // clear any polluted value so greeting can trigger
+      // ✅ Self‑chat control: set owner to self and greet proactively
+      const selfJid = sock?.user?.id || null;
+      u.ownerJid = selfJid;
+      console.log(`[${username}] BOT JID: ${selfJid} (ownerJid set to self)`);
+
+      if (!u.greeted && selfJid) {
+        u.greeted = true;
+        try {
+          await sock.sendMessage(selfJid, {
+            text:
+              `✅ Connected.\n\n` +
+              `Use:\n` +
+              `• /text — switch to text mode\n` +
+              `• /media — switch to image mode\n` +
+              `• /cats — pick a category to send to\n` +
+              `• /rescan — refresh your groups\n\n` +
+              `Now send a message (in /text) or an image (in /media) to broadcast.`
+          });
+        } catch (e) {
+          console.warn(`[${username}] failed to send greeting to self:`, e?.message || e);
+        }
       }
 
       u.lastQR = null;
@@ -217,7 +234,6 @@ function bindEventListeners(sock, username) {
     try {
       u.lastActive = Date.now();
       for (const msg of messages || []) {
-        // visibility for debugging
         const jid = msg?.key?.remoteJid || "";
         const fromMe = !!msg?.key?.fromMe;
         console.log(`[${username}] upsert type=${type} fromMe=${fromMe} jid=${jid}`);
