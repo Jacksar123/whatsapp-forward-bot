@@ -52,18 +52,6 @@ const allowedOrigins = [
 /* --------------------------- global in-memory ---------------------------- */
 
 const USERS = global.USERS || (global.USERS = {});
-// USERS[username] = {
-//   sock, socketActive, connecting, ended,
-//   lastOpenAt, lastActive,
-//   categories, allGroups,
-//   pendingImage, pendingText, lastPromptChat,
-//   mode, // 'media' | 'text'
-//   lastQR, qrTs, lastQrAt, qrAttempts, qrPausedUntil,
-//   reconnectDelay,
-//   readyForHeavyTasks,
-//   ownerJid,
-//   saveCredsFn,
-// }
 
 /* ------------------------------- helpers -------------------------------- */
 
@@ -181,14 +169,24 @@ function bindEventListeners(sock, username) {
 
       console.warn(`[${username}] Connection closed: code=${code} message=${lastDisconnect?.error?.message || "n/a"}`);
 
+      // Handle Bad MAC explicitly
+      if (String(lastDisconnect?.error?.message || "").includes("bad-mac")) {
+        console.error(`[${username}] ❌ Bad MAC detected – wiping auth & forcing re-login`);
+        await endSession(u);
+        const paths = getUserPaths(username);
+        try { fs.rmSync(paths.auth, { recursive: true, force: true }); } catch {}
+        setTimeout(() => startUserSession(username).catch(() => {}),
+          3000);
+        return;
+      }
+
       await endSession(u);
 
       switch (code) {
         case DisconnectReason.connectionReplaced:
-        case 440: // Stream conflict variant
+        case 440: // Stream conflict
         case DisconnectReason.loggedOut:
           notifyFrontend(username, { connected: false, needsRelink: true });
-          // no auto-reconnect; force relink
           break;
         case DisconnectReason.restartRequired:
         case DisconnectReason.timedOut:
@@ -204,7 +202,7 @@ function bindEventListeners(sock, username) {
     }
   });
 
-  // inbound messages (owner-DM gating is inside handleBroadcastMessage)
+  // inbound messages
   sock.ev.on("messages.upsert", async ({ messages }) => {
     try {
       u.lastActive = Date.now();
@@ -223,7 +221,7 @@ function bindEventListeners(sock, username) {
 
 async function startUserSession(username) {
   const existing = USERS[username] || (USERS[username] = {});
-  if (existing.socketActive || existing.connecting) return; // singleton
+  if (existing.socketActive || existing.connecting) return;
   existing.connecting = true;
 
   const paths = getUserPaths(username);
@@ -275,7 +273,6 @@ async function startUserSession(username) {
     generateHighQualityLinkPreview: false,
   });
 
-  // safe send wrapper (avoid throwing on transient socket close)
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
@@ -287,11 +284,9 @@ async function startUserSession(username) {
     }
   };
 
-  // store on user
   USERS[username].sock = sock;
   USERS[username].saveCredsFn = saveCreds;
 
-  // bind events
   bindEventListeners(sock, username);
 
   USERS[username].connecting = false;
@@ -314,7 +309,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// feature routes (unchanged API surface)
+// routes
 app.use("/quick-actions", require("./routes/quick-actions")(USERS));
 app.use("/get-categories", require("./routes/get-categories")(USERS));
 app.use("/set-categories", require("./routes/set-categories")(USERS));
@@ -326,7 +321,7 @@ app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (user
   delete USERS[username];
 }));
 
-// create (or resume) a user session
+// create user
 app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -390,14 +385,12 @@ app.post("/reset-qr/:username", (req, res) => {
   res.json({ ok: true });
 });
 
-// serve the current QR (raw string)
 app.get("/get-qr/:username", (req, res) => {
   const u = USERS[req.params.username];
   if (!u?.lastQR) return res.status(404).json({ ok: false, error: "no QR" });
   res.json({ ok: true, qr: u.lastQR, ts: u.qrTs || Date.now() });
 });
 
-// debug
 app.get("/debug/state/:username", async (req, res) => {
   try {
     const data = await loadUserState(req.params.username);
@@ -442,13 +435,11 @@ if (fs.existsSync(usersDirPath)) {
 
 /* ------------------------ background maintenance ------------------------ */
 
-// media cleanup (every 6h)
 setInterval(() => {
   try { cleanupOldMedia(); } catch (e) { console.error("[cleanup] error", e); }
 }, 6 * 60 * 60 * 1000);
 cleanupOldMedia();
 
-// idle reaper
 setInterval(() => {
   const now = Date.now();
   for (const [username, u] of Object.entries(USERS)) {
@@ -473,7 +464,6 @@ setInterval(() => {
   }
 }, 60_000);
 
-// mem logs
 setInterval(logMem, 120_000);
 
 /* --------------------------------- start -------------------------------- */
@@ -482,7 +472,6 @@ app.listen(PORT, HOST, () => {
   console.log(`🚀 Bot server running on port ${PORT}`);
   logMem();
 
-  // Optional: auto-boot a user for testing
   const BOOT_USER = process.env.BOOT_USER;
   if (BOOT_USER) {
     console.log(`[INIT] Rehydrated ${BOOT_USER}`);
