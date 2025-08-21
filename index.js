@@ -40,7 +40,7 @@ const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
 const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
 const RECONNECT_BASE_MS = 3_000;
-the RECONNECT_MAX_MS = 60_000;
+const RECONNECT_MAX_MS = 60_000;
 
 // CORS
 const allowedOrigins = [
