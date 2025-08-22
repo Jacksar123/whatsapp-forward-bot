@@ -36,8 +36,8 @@ const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30min idle
 const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 
 // QR / reconnect tuning
-const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
-const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
+const QR_DEBOUNCE_MS = 15_000;
+const MAX_QR_ATTEMPTS = 6;
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 
@@ -143,6 +143,25 @@ function bindEventListeners(sock, username) {
       u.selfJid = selfId;
       console.log(`[${username}] BOT JID: ${selfId} (ownerJid set to self)`);
       u.ownerJid = bareJid(selfId);
+
+      // ✅ Send greeting immediately after connection opens
+      if (!u.greeted) {
+        u.greeted = true;
+        try {
+          await sock.sendMessage(u.ownerJid, {
+            text:
+              `✅ Connected!\n\n` +
+              `Commands:\n` +
+              `• /text — switch to text mode\n` +
+              `• /media — switch to image mode\n` +
+              `• /cats — pick a category to send to\n` +
+              `• /rescan — refresh your groups\n\n` +
+              `Now send a message (in /text) or an image (in /media) to broadcast.`
+          });
+        } catch (err) {
+          console.error(`[${username}] Failed to send greeting:`, err.message);
+        }
+      }
 
       u.lastQR = null;
       u.qrAttempts = 0;
@@ -491,12 +510,5 @@ setInterval(logMem, 120_000);
 /* --------------------------------- start -------------------------------- */
 
 app.listen(PORT, HOST, () => {
-  console.log(`🚀 Bot server running on port ${PORT}`);
-  logMem();
-
-  const BOOT_USER = process.env.BOOT_USER;
-  if (BOOT_USER) {
-    console.log(`[INIT] Rehydrated ${BOOT_USER}`);
-    startUserSession(BOOT_USER).catch((e) => console.error("[boot] startUserSession error", e));
-  }
+  console.log(`🚀 server running http://${HOST}:${PORT}`);
 });
