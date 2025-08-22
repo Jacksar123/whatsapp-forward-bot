@@ -84,15 +84,12 @@ async function persistUserState(username) {
 
 async function endSession(u = {}) {
   try {
-    // Best-effort: detach listeners first so ws.close() doesn’t bubble an error
     if (u.sock?.ev?.removeAllListeners) {
       try { u.sock.ev.removeAllListeners(); } catch {}
     }
-    // Quietly close the underlying ws if it exists
     try { u.sock?.ws?.removeAllListeners?.("error"); } catch {}
     try { u.sock?.ws?.removeAllListeners?.("close"); } catch {}
     try { u.sock?.ws?.close?.(); } catch {}
-    // Baileys high-level end
     try { u.sock?.end?.(); } catch {}
   } catch {}
   u.sock = null;
@@ -111,19 +108,16 @@ function bareJid(j) {
 function bindEventListeners(sock, username) {
   const u = USERS[username];
 
-  // creds persistence
   sock.ev.on("creds.update", async () => {
     try { await u.saveCredsFn?.(); } catch (e) {
       console.warn(`[${username}] creds.update save failed: ${e.message}`);
     }
   });
 
-  // connection lifecycle
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
-    // Controlled QR surfacing
     if (qr) {
       if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
         u.lastQrAt = now;
@@ -148,7 +142,6 @@ function bindEventListeners(sock, username) {
       const selfId = sock?.user?.id || "";
       u.selfJid = selfId;
       console.log(`[${username}] BOT JID: ${selfId} (ownerJid set to self)`);
-      // Set owner to bare self so self-DM works regardless of device suffix
       u.ownerJid = bareJid(selfId);
 
       u.lastQR = null;
@@ -157,7 +150,6 @@ function bindEventListeners(sock, username) {
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
-      // Defer heavy tasks slightly to avoid race right after open
       setTimeout(async () => {
         try {
           u.readyForHeavyTasks = true;
@@ -181,7 +173,6 @@ function bindEventListeners(sock, username) {
       const message = lastDisconnect?.error?.message || "n/a";
       console.warn(`[${username}] Connection closed: code=${code} message=${message}`);
 
-      // Handle Bad MAC explicitly → wipe auth & force re-login
       if (String(message).toLowerCase().includes("bad-mac")) {
         console.error(`[${username}] ❌ Bad MAC detected – wiping auth & forcing re-login`);
         await endSession(u);
@@ -193,19 +184,17 @@ function bindEventListeners(sock, username) {
 
       await endSession(u);
 
-      // reset QR counters on disconnect
       u.qrAttempts = 0;
       u.qrPausedUntil = 0;
 
       switch (code) {
-        case 408: // QR refs attempts ended
-          // Ask frontend to re-show QR (Baileys will emit a new one on next boot)
+        case 408:
           notifyFrontend(username, { connected: false });
           setTimeout(() => startUserSession(username).catch(() => {}), 2_000);
           break;
 
         case DisconnectReason.connectionReplaced:
-        case 440: // Stream conflict (or explicit)
+        case 440:
         case DisconnectReason.loggedOut:
           notifyFrontend(username, { connected: false, needsRelink: true });
           break;
@@ -226,18 +215,14 @@ function bindEventListeners(sock, username) {
     }
   });
 
-  // inbound messages → forward ALL to the broadcast handler (self-DM supported)
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+  sock.ev.on("messages.upsert", async ({ messages }) => {
     try {
       u.lastActive = Date.now();
       for (const msg of messages || []) {
         const jid = msg?.key?.remoteJid || "";
         const fromMe = !!msg?.key?.fromMe;
-
-        // Log kinds for debug visibility
         const kinds = Object.keys(msg?.message || {}).join("|") || "none";
-        console.log(`[${username}] rx: chat=${jid} self=${bareJid(jid)===bareJid(u.ownerJid)} fromMe=${fromMe} kinds=${kinds}`);
-
+        console.log(`[${username}] rx: chat=${jid} fromMe=${fromMe} kinds=${kinds}`);
         await handleBroadcastMessage(username, msg, sock);
       }
     } catch (e) {
@@ -261,7 +246,6 @@ async function startUserSession(username) {
   await ensureDir(paths.data);
   await ensureDir(paths.media);
 
-  // hydrate categories/groups
   let persisted = {};
   try { persisted = await loadUserState(username); } catch (e) {
     console.warn(`[rehydrate] Supabase load failed for ${username}: ${e.message}`);
@@ -288,7 +272,6 @@ async function startUserSession(username) {
     ownerJid: existing.ownerJid || null
   });
 
-  // Baileys boot
   const logger = P({ level: "silent" });
   const { state, saveCreds } = await useMultiFileAuthState(paths.auth);
   const { version } = await fetchLatestBaileysVersion();
@@ -306,7 +289,6 @@ async function startUserSession(username) {
     generateHighQualityLinkPreview: false,
   });
 
-  // convenience wrapper with mild error swallowing for closed sockets
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
@@ -333,7 +315,6 @@ const app = express();
 app.use(express.json({ limit: "5mb" }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  // CORS: allow both prod + preview Lovable frontends
   const allowed = [
     "https://whats-broadcast-hub.lovable.app",
     "https://preview--whats-broadcast-hub.lovable.app"
@@ -348,7 +329,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// routes
 app.use("/quick-actions", require("./routes/quick-actions")(USERS));
 app.use("/get-categories", require("./routes/get-categories")(USERS));
 app.use("/set-categories", require("./routes/set-categories")(USERS));
@@ -360,7 +340,6 @@ app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (user
   delete USERS[username];
 }));
 
-// create user
 app.post("/create-user", async (req, res) => {
   try {
     let { username } = req.body || {};
@@ -376,7 +355,6 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// status endpoints
 app.get("/status/:username", (req, res) => {
   const username = req.params.username;
   const u = USERS[username] || {};
@@ -429,7 +407,7 @@ app.get("/get-qr/:username", (req, res) => {
   if (!u) return res.status(404).json({ error: "User not found" });
   if (!u.lastQR) {
     return res.json({ ok: false, error: "QR not available yet", retry: true });
-    }
+  }
   res.json({ ok: true, qr: u.lastQR, ts: u.qrTs || Date.now() });
 });
 
