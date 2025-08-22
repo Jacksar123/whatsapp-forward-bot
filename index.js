@@ -1,9 +1,8 @@
 // index.js
 require("dotenv").config();
-const fs = require("fs");
+const fs = require("fs-extra");
 const path = require("path");
 const express = require("express");
-const cors = require("cors");
 const P = require("pino");
 
 const {
@@ -41,12 +40,6 @@ const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
 const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
-
-// CORS
-const allowedOrigins = [
-  "https://whats-broadcast-hub.lovable.app",
-  "https://preview--whats-broadcast-hub.lovable.app"
-];
 
 /* --------------------------- global in-memory ---------------------------- */
 
@@ -90,8 +83,18 @@ async function persistUserState(username) {
 }
 
 async function endSession(u = {}) {
-  try { await u.sock?.ws?.close(); } catch {}
-  try { await u.sock?.end?.(); } catch {}
+  try {
+    // Best-effort: detach listeners first so ws.close() doesn’t bubble an error
+    if (u.sock?.ev?.removeAllListeners) {
+      try { u.sock.ev.removeAllListeners(); } catch {}
+    }
+    // Quietly close the underlying ws if it exists
+    try { u.sock?.ws?.removeAllListeners?.("error"); } catch {}
+    try { u.sock?.ws?.removeAllListeners?.("close"); } catch {}
+    try { u.sock?.ws?.close?.(); } catch {}
+    // Baileys high-level end
+    try { u.sock?.end?.(); } catch {}
+  } catch {}
   u.sock = null;
   u.socketActive = false;
   u.connecting = false;
@@ -99,6 +102,11 @@ async function endSession(u = {}) {
 }
 
 /* ------------------------------ event binder ---------------------------- */
+
+function bareJid(j) {
+  const s = String(j || "");
+  return s.replace(/:[^@]+(?=@)/, "");
+}
 
 function bindEventListeners(sock, username) {
   const u = USERS[username];
@@ -115,7 +123,7 @@ function bindEventListeners(sock, username) {
     const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
-    // Controlled QR surfacing (patched)
+    // Controlled QR surfacing
     if (qr) {
       if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
         u.lastQrAt = now;
@@ -137,28 +145,11 @@ function bindEventListeners(sock, username) {
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
 
-      // ✅ Self‑chat control: set owner to self and greet proactively
-      const selfJid = sock?.user?.id || null;
-      u.ownerJid = selfJid;
-      console.log(`[${username}] BOT JID: ${selfJid} (ownerJid set to self)`);
-
-      if (!u.greeted && selfJid) {
-        u.greeted = true;
-        try {
-          await sock.sendMessage(selfJid, {
-            text:
-              `✅ Connected.\n\n` +
-              `Use:\n` +
-              `• /text — switch to text mode\n` +
-              `• /media — switch to image mode\n` +
-              `• /cats — pick a category to send to\n` +
-              `• /rescan — refresh your groups\n\n` +
-              `Now send a message (in /text) or an image (in /media) to broadcast.`
-          });
-        } catch (e) {
-          console.warn(`[${username}] failed to send greeting to self:`, e?.message || e);
-        }
-      }
+      const selfId = sock?.user?.id || "";
+      u.selfJid = selfId;
+      console.log(`[${username}] BOT JID: ${selfId} (ownerJid set to self)`);
+      // Set owner to bare self so self-DM works regardless of device suffix
+      u.ownerJid = bareJid(selfId);
 
       u.lastQR = null;
       u.qrAttempts = 0;
@@ -187,16 +178,15 @@ function bindEventListeners(sock, username) {
         lastDisconnect?.output?.statusCode ??
         lastDisconnect?.reason;
 
-      console.warn(
-        `[${username}] Connection closed: code=${code} message=${lastDisconnect?.error?.message || "n/a"}`
-      );
+      const message = lastDisconnect?.error?.message || "n/a";
+      console.warn(`[${username}] Connection closed: code=${code} message=${message}`);
 
-      // Handle Bad MAC explicitly
-      if (String(lastDisconnect?.error?.message || "").includes("bad-mac")) {
+      // Handle Bad MAC explicitly → wipe auth & force re-login
+      if (String(message).toLowerCase().includes("bad-mac")) {
         console.error(`[${username}] ❌ Bad MAC detected – wiping auth & forcing re-login`);
         await endSession(u);
         const paths = getUserPaths(username);
-        try { fs.rmSync(paths.auth, { recursive: true, force: true }); } catch {}
+        try { await fs.remove(paths.auth); } catch {}
         setTimeout(() => startUserSession(username).catch(() => {}), 3000);
         return;
       }
@@ -208,11 +198,18 @@ function bindEventListeners(sock, username) {
       u.qrPausedUntil = 0;
 
       switch (code) {
+        case 408: // QR refs attempts ended
+          // Ask frontend to re-show QR (Baileys will emit a new one on next boot)
+          notifyFrontend(username, { connected: false });
+          setTimeout(() => startUserSession(username).catch(() => {}), 2_000);
+          break;
+
         case DisconnectReason.connectionReplaced:
-        case 440: // Stream conflict
+        case 440: // Stream conflict (or explicit)
         case DisconnectReason.loggedOut:
           notifyFrontend(username, { connected: false, needsRelink: true });
           break;
+
         case DisconnectReason.restartRequired:
         case DisconnectReason.timedOut:
         default:
@@ -229,14 +226,18 @@ function bindEventListeners(sock, username) {
     }
   });
 
-  // inbound messages → forward ALL to the broadcast handler
+  // inbound messages → forward ALL to the broadcast handler (self-DM supported)
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       u.lastActive = Date.now();
       for (const msg of messages || []) {
         const jid = msg?.key?.remoteJid || "";
         const fromMe = !!msg?.key?.fromMe;
-        console.log(`[${username}] upsert type=${type} fromMe=${fromMe} jid=${jid}`);
+
+        // Log kinds for debug visibility
+        const kinds = Object.keys(msg?.message || {}).join("|") || "none";
+        console.log(`[${username}] rx: chat=${jid} self=${bareJid(jid)===bareJid(u.ownerJid)} fromMe=${fromMe} kinds=${kinds}`);
+
         await handleBroadcastMessage(username, msg, sock);
       }
     } catch (e) {
@@ -282,7 +283,9 @@ async function startUserSession(username) {
     lastQR: null, qrTs: 0,
     lastQrAt: 0, qrAttempts: 0, qrPausedUntil: 0,
     reconnectDelay: RECONNECT_BASE_MS,
-    readyForHeavyTasks: false
+    readyForHeavyTasks: false,
+    selfJid: null,
+    ownerJid: existing.ownerJid || null
   });
 
   // Baileys boot
@@ -330,7 +333,12 @@ const app = express();
 app.use(express.json({ limit: "5mb" }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin)) {
+  // CORS: allow both prod + preview Lovable frontends
+  const allowed = [
+    "https://whats-broadcast-hub.lovable.app",
+    "https://preview--whats-broadcast-hub.lovable.app"
+  ];
+  if (allowed.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -421,7 +429,7 @@ app.get("/get-qr/:username", (req, res) => {
   if (!u) return res.status(404).json({ error: "User not found" });
   if (!u.lastQR) {
     return res.json({ ok: false, error: "QR not available yet", retry: true });
-  }
+    }
   res.json({ ok: true, qr: u.lastQR, ts: u.qrTs || Date.now() });
 });
 
@@ -461,7 +469,9 @@ if (fs.existsSync(usersDirPath)) {
       lastQR: null, qrTs: 0,
       lastQrAt: 0, qrAttempts: 0, qrPausedUntil: 0,
       reconnectDelay: RECONNECT_BASE_MS,
-      readyForHeavyTasks: false
+      readyForHeavyTasks: false,
+      selfJid: null,
+      ownerJid: null
     };
     console.log(`[INIT] Rehydrated ${username}`);
   }
