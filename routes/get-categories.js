@@ -1,3 +1,4 @@
+// routes/get-categories.js
 const express = require("express");
 const fs = require("fs-extra");
 const { readJSON, getUserPaths } = require("../lib/utils");
@@ -31,7 +32,7 @@ module.exports = (USERS) => {
         const foundCat = categoryNames.find(cat =>
           (categories[cat] || []).includes(jid)
         );
-        return { name, category: foundCat || null };
+        return { name, jid, category: foundCat || null }; // ✅ include JID for round-trip safety
       });
 
       return res.json({ categories: categoryNames, groups });
