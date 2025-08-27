@@ -11,7 +11,7 @@ module.exports = (USERS, startUserSession, endUserSession) => {
   router.get("/users", (req, res) => {
     const data = Object.entries(USERS).map(([username, user]) => ({
       username,
-      connected: !!user.socketActive, // fix: use socketActive (not user.connected)
+      connected: !!user.socketActive, // use socketActive, not user.connected
       ended: !!user.ended,
       lastActive: user.lastActive ? new Date(user.lastActive).toISOString() : null,
     }));
@@ -19,11 +19,16 @@ module.exports = (USERS, startUserSession, endUserSession) => {
   });
 
   // ✅ POST /admin/end/:username
-  router.post("/end/:username", (req, res) => {
+  router.post("/end/:username", async (req, res) => {
     const { username } = req.params;
     if (!USERS[username]) return res.status(404).json({ error: "User not found" });
-    endUserSession(username);
-    return res.json({ ok: true, message: `Ended session for ${username}` });
+    try {
+      await endUserSession(username); // graceful shutdown
+      return res.json({ ok: true, message: `Ended session for ${username}` });
+    } catch (e) {
+      console.error(`[admin] end ${username} failed:`, e.message);
+      return res.status(500).json({ error: "Failed to end session" });
+    }
   });
 
   // ✅ POST /admin/restart/:username
@@ -42,12 +47,20 @@ module.exports = (USERS, startUserSession, endUserSession) => {
   router.post("/nuke-auth/:username", async (req, res) => {
     const { username } = req.params;
     try {
-      const p = getUserPaths(username);
-      await fs.remove(p.auth); // delete auth_info/*
-      if (USERS[username]?.sock?.ws?.close) {
-        USERS[username].sock.ws.close();
+      // 1) Graceful shutdown first (drain listeners / close socket)
+      if (USERS[username]) {
+        try { await endUserSession(username); } catch (e) {
+          console.warn(`[admin] endUserSession warning for ${username}: ${e.message}`);
+        }
       }
+
+      // 2) Remove auth folder on disk
+      const p = getUserPaths(username);
+      await fs.remove(p.auth); // delete users/<username>/auth_info
+
+      // 3) Remove from memory map
       delete USERS[username];
+
       return res.json({ ok: true, message: `Auth nuked for ${username}` });
     } catch (e) {
       console.error(`[admin] nuke-auth ${username} failed:`, e.message);
@@ -56,27 +69,21 @@ module.exports = (USERS, startUserSession, endUserSession) => {
   });
 
   // ✅ POST /admin/nuke-all-auth  (wipe ALL users' auth_info + clear in-memory sessions)
-  router.post("/nuke-all-auth", async (req, res) => {
+  router.post("/nuke-all-auth", async (_req, res) => {
     const nuked = new Set();
 
     try {
-      // 1) Close any active sockets & drop in-memory users
-      for (const username of Object.keys(USERS)) {
+      // 1) Gracefully end all active/in-memory sessions
+      const memUsers = Object.keys(USERS);
+      for (const username of memUsers) {
         try {
-          const p = getUserPaths(username);
-          await fs.remove(p.auth);
-          if (USERS[username]?.sock?.ws?.close) {
-            USERS[username].sock.ws.close();
-          }
-          delete USERS[username];
-          nuked.add(username);
-          console.log(`[admin] nuked auth (memory) for ${username}`);
+          await endUserSession(username);
         } catch (e) {
-          console.warn(`[admin] nuke-all (memory) failed for ${username}: ${e.message}`);
+          console.warn(`[admin] endUserSession warning for ${username}: ${e.message}`);
         }
       }
 
-      // 2) Also scrub any auth_info folders that exist on disk for users NOT in memory
+      // 2) Remove all auth_info folders on disk (covers users not in memory)
       const usersRoot = path.join(__dirname, "..", "users");
       if (await fs.pathExists(usersRoot)) {
         const diskUsers = await fs.readdir(usersRoot);
@@ -93,6 +100,9 @@ module.exports = (USERS, startUserSession, endUserSession) => {
           }
         }
       }
+
+      // 3) Clear the in-memory USERS map
+      for (const u of Object.keys(USERS)) delete USERS[u];
 
       return res.json({
         ok: true,

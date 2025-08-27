@@ -28,16 +28,34 @@ const {
 const { cleanupOldMedia } = require("./cleanup");
 const { loadUserState, saveUserState, notifyFrontend, getFrontendStatus } = require("./lib/state");
 
+/* ---------------------------- global guards ----------------------------- */
+process.on("uncaughtException", (err) => {
+  const msg = String(err?.message || "");
+  if (/Connection Closed|SOCKET_NOT_OPEN|stream closed/i.test(msg)) {
+    console.warn("[guard] swallowed uncaughtException:", msg);
+    return;
+  }
+  console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+  const msg = String((reason && reason.message) || reason || "");
+  if (/Connection Closed|SOCKET_NOT_OPEN|stream closed/i.test(msg)) {
+    console.warn("[guard] swallowed unhandledRejection:", msg);
+    return;
+  }
+  console.error("[unhandledRejection]", reason);
+});
+
 /* -------------------------------- config -------------------------------- */
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 10000;
 const HOST = "0.0.0.0";
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30min idle (based on lastActive)
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30min idle
 const DASHBOARD_URL = "https://whats-broadcast-hub.lovable.app";
 
 // QR / reconnect tuning
-const QR_DEBOUNCE_MS = 15_000;     // min gap between QR emits
-const MAX_QR_ATTEMPTS = 6;         // warn after 6 attempts
+const QR_DEBOUNCE_MS = 15_000;
+const MAX_QR_ATTEMPTS = 6;
 const RECONNECT_BASE_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 
@@ -130,17 +148,31 @@ function bindEventListeners(sock, username) {
     const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
-    // Controlled QR surfacing (debounced)
+    // ---- QR cooldown + debounce ----
     if (qr) {
-      if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
-        u.lastQrAt = now;
-        u.lastQR = qr;
-        u.qrTs = now;
-        u.qrAttempts = (u.qrAttempts || 0) + 1;
-        notifyFrontend(username, { qrAvailable: true });
-        console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
-        if (u.qrAttempts > MAX_QR_ATTEMPTS) {
-          console.warn(`[${username}] ⚠️ Many QR attempts without scan (attempts=${u.qrAttempts})`);
+      const COOLDOWN_MS = 30 * 60 * 1000; // 30m
+      if (u.qrPausedUntil && now < u.qrPausedUntil) {
+        // cooling down, skip
+      } else {
+        if (!u.lastQrAt || now - u.lastQrAt >= QR_DEBOUNCE_MS) {
+          u.lastQrAt = now;
+          u.lastQR = qr;
+          u.qrTs = now;
+          u.qrAttempts = (u.qrAttempts || 0) + 1;
+          notifyFrontend(username, { qrAvailable: true });
+          console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
+
+          if (u.qrAttempts >= MAX_QR_ATTEMPTS) {
+            u.qrPausedUntil = now + COOLDOWN_MS;
+            u.lastQR = null;
+            notifyFrontend(username, { qrAvailable: false });
+            console.warn(`[${username}] ⚠️ Too many QR attempts. Paused ${COOLDOWN_MS/60000}m`);
+            try {
+              await sock.sendMessage(u.ownerJid || sock.user.id, {
+                text: `⚠️ Too many QR attempts. Paused 30 minutes. Try later.`
+              });
+            } catch {}
+          }
         }
       }
     }
@@ -154,8 +186,7 @@ function bindEventListeners(sock, username) {
 
       const selfId = sock?.user?.id || "";
       u.selfJid = selfId;
-      console.log(`[${username}] BOT JID: ${selfId} (ownerJid set to self)`);
-      // lock owner to bare self so self-DM works regardless of device suffix
+      console.log(`[${username}] BOT JID: ${selfId}`);
       u.ownerJid = bareJid(selfId);
 
       u.lastQR = null;
@@ -164,29 +195,18 @@ function bindEventListeners(sock, username) {
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
-      // Send greeting immediately (try ownerJid first, then fallback to full self JID)
-      (async () => {
-        if (!u.greeted) {
-          u.greeted = true;
-          const greeting =
-            `✅ Connected!\n\n` +
-            `Commands:\n` +
-            `• /text — switch to text mode\n` +
-            `• /media — switch to image mode\n` +
-            `• /cats — pick a category to send to\n` +
-            `• /rescan — refresh your groups\n\n` +
-            `Now send a message (in /text) or an image (in /media) to broadcast.`;
-          try {
-            await sock.sendMessage(u.ownerJid, { text: greeting });
-          } catch (e1) {
-            try { await sock.sendMessage(selfId, { text: greeting }); } catch (e2) {
-              console.warn(`[${username}] greeting failed: ${e1?.message || e1} / ${e2?.message || e2}`);
-            }
-          }
-        }
-      })();
+      if (!u.greeted) {
+        u.greeted = true;
+        const greeting =
+          `✅ Connected!\n\nCommands:\n` +
+          `• /text — switch to text mode\n` +
+          `• /media — switch to image mode\n` +
+          `• /cats — pick a category to send to\n` +
+          `• /rescan — refresh groups\n\n` +
+          `Now send a message or image to broadcast.`;
+        try { await sock.sendMessage(u.ownerJid, { text: greeting }); } catch {}
+      }
 
-      // Defer heavy tasks slightly to avoid race right after open
       setTimeout(async () => {
         try {
           u.readyForHeavyTasks = true;
@@ -210,9 +230,8 @@ function bindEventListeners(sock, username) {
       const message = lastDisconnect?.error?.message || "n/a";
       console.warn(`[${username}] Connection closed: code=${code} message=${message}`);
 
-      // Handle Bad MAC explicitly → wipe auth & force re-login
       if (String(message).toLowerCase().includes("bad-mac")) {
-        console.error(`[${username}] ❌ Bad MAC detected – wiping auth & forcing re-login`);
+        console.error(`[${username}] ❌ Bad MAC → wiping auth & relogin`);
         await endSession(u);
         await wipeAuth(username);
         setTimeout(() => startUserSession(username).catch(() => {}), 3000);
@@ -220,23 +239,19 @@ function bindEventListeners(sock, username) {
       }
 
       await endSession(u);
-
-      // reset QR counters on disconnect
       u.qrAttempts = 0;
       u.qrPausedUntil = 0;
 
       switch (code) {
-        case 408: // QR refs attempts ended
+        case 408:
           notifyFrontend(username, { connected: false });
-          setTimeout(() => startUserSession(username).catch(() => {}), 2_000);
+          setTimeout(() => startUserSession(username).catch(() => {}), 2000);
           break;
-
         case DisconnectReason.connectionReplaced:
-        case 440: // Stream conflict (or explicit)
+        case 440:
         case DisconnectReason.loggedOut:
           notifyFrontend(username, { connected: false, needsRelink: true });
           break;
-
         case DisconnectReason.restartRequired:
         case DisconnectReason.timedOut:
         default:
@@ -247,13 +262,13 @@ function bindEventListeners(sock, username) {
           );
           setTimeout(
             () => startUserSession(username).catch(() => {}),
-            5_000 + Math.random() * 10_000
+            5000 + Math.random() * 10000
           );
       }
     }
   });
 
-  // inbound messages → forward ALL to the broadcast handler (self-DM supported)
+  // inbound messages
   sock.ev.on("messages.upsert", async ({ messages }) => {
     try {
       u.lastActive = Date.now();
@@ -287,11 +302,8 @@ async function startUserSession(username) {
   await ensureDir(paths.data);
   await ensureDir(paths.media);
 
-  // hydrate categories/groups
   let persisted = {};
-  try { persisted = await loadUserState(username); } catch (e) {
-    console.warn(`[rehydrate] Supabase load failed for ${username}: ${e.message}`);
-  }
+  try { persisted = await loadUserState(username); } catch {}
   const savedCategories = persisted.categories || readJSON(paths.categories, {});
   const savedGroups = persisted.groups || readJSON(paths.groups, {});
 
@@ -314,7 +326,6 @@ async function startUserSession(username) {
     ownerJid: existing.ownerJid || null
   });
 
-  // Baileys boot
   const logger = P({ level: "silent" });
   const { state, saveCreds } = await useMultiFileAuthState(paths.auth);
   const { version } = await fetchLatestBaileysVersion();
@@ -332,7 +343,6 @@ async function startUserSession(username) {
     generateHighQualityLinkPreview: false,
   });
 
-  // convenience wrapper with mild error swallowing for closed sockets
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
@@ -357,9 +367,10 @@ async function startUserSession(username) {
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
+
+// CORS
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  // CORS: allow both prod + preview Lovable frontends
   const allowed = [
     "https://whats-broadcast-hub.lovable.app",
     "https://preview--whats-broadcast-hub.lovable.app"
@@ -406,7 +417,7 @@ app.post("/create-user", async (req, res) => {
 app.get("/status/:username", async (req, res) => {
   const username = req.params.username;
   const u = USERS[username] || {};
-  const status = await getFrontendStatus(username); // await the async helper
+  const status = await getFrontendStatus(username);
   res.json({
     ok: true,
     connected: !!u.socketActive,
@@ -421,7 +432,7 @@ app.get("/status/:username", async (req, res) => {
 app.get("/connection-status/:username", async (req, res) => {
   const u = USERS[req.params.username];
   if (!u) return res.status(404).json({ error: "User not found" });
-  const status = await getFrontendStatus(req.params.username); // await
+  const status = await getFrontendStatus(req.params.username);
   res.json({
     connected: !!u.socketActive,
     needsReconnect: !!status.needsRelink
@@ -510,7 +521,6 @@ setInterval(() => {
 }, 6 * 60 * 60 * 1000);
 cleanupOldMedia();
 
-// 🔁 Idle timeout monitor — uses lastActive (NOT lastOpenAt)
 setInterval(() => {
   const now = Date.now();
   for (const [username, u] of Object.entries(USERS)) {
@@ -522,15 +532,13 @@ setInterval(() => {
         try {
           if (u.ownerJid) {
             await u.sock?.safeSend?.(u.ownerJid, {
-              text:
-                `🕒 Session paused due to inactivity.\n` +
-                `Reopen your dashboard to resume:\n${DASHBOARD_URL}`
+              text: `🕒 Session paused due to inactivity.\nReopen dashboard to resume:\n${DASHBOARD_URL}`
             }).catch(() => {});
           }
         } catch {}
         await persistUserState(username);
         await endSession(u);
-        await wipeAuth(username);              // force QR next time
+        await wipeAuth(username);
         notifyFrontend(username, { connected: false, needsRelink: true, qrAvailable: false });
       })();
     }
@@ -543,10 +551,9 @@ setInterval(logMem, 120_000);
 
 app.listen(PORT, HOST, () => {
   console.log(`🚀 server running http://${HOST}:${PORT}`);
-
   const BOOT_USER = process.env.BOOT_USER;
   if (BOOT_USER) {
     console.log(`[INIT] Booting user ${BOOT_USER}`);
-    startUserSession(BOOT_USER).catch((e) => console.error("[boot] startUserSession error", e));
+    startUserSession(BOOT_USER).catch((e) => console.error("[boot] error", e));
   }
 });
