@@ -368,14 +368,20 @@ async function startUserSession(username) {
 const app = express();
 app.use(express.json({ limit: "5mb" }));
 
-// CORS
+// ----- CORS (env override supported) -----
+const DEFAULT_ALLOWED = [
+  "https://whats-broadcast-hub.lovable.app",
+  "https://preview--whats-broadcast-hub.lovable.app",
+  "https://forwardly.online" // add your custom domain here
+];
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || DEFAULT_ALLOWED.join(","))
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const allowed = [
-    "https://whats-broadcast-hub.lovable.app",
-    "https://preview--whats-broadcast-hub.lovable.app"
-  ];
-  if (allowed.includes(origin)) {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
