@@ -6,38 +6,42 @@ const { readJSON, getUserPaths } = require("../lib/utils");
 module.exports = (USERS) => {
   const router = express.Router();
 
-  // ✅ GET /get-categories/:username
+  // GET /get-categories/:username
   router.get("/:username", async (req, res) => {
     const { username } = req.params;
     if (!username) return res.status(400).json({ error: "Missing username" });
 
-    let categories = {};
-    let allGroups = {};
-
     try {
-      const user = USERS[username];
+      const u = USERS[username];
       const paths = getUserPaths(username);
 
-      if (user?.connected) {
-        categories = user.categories || {};
-        allGroups = user.allGroups || {};
-      } else {
-        categories = await fs.readJson(paths.categories).catch(() => ({}));
-        allGroups = await fs.readJson(paths.groups).catch(() => ({}));
-      }
+      // Use the REAL flag your runtime sets
+      const online = !!u?.socketActive;
 
-      const categoryNames = Object.keys(categories);
-      const groups = Object.entries(allGroups).map(([jid, group]) => {
-        const name = group.name || group.subject || jid;
-        const foundCat = categoryNames.find(cat =>
-          (categories[cat] || []).includes(jid)
+      const categories = online
+        ? (u?.categories || {})
+        : await fs.readJson(paths.categories).catch(() => ({}));
+
+      const allGroups = online
+        ? (u?.allGroups || {})
+        : await fs.readJson(paths.groups).catch(() => ({}));
+
+      // Multi-category mapping for each group
+      const groups = Object.entries(allGroups).map(([jid, g]) => {
+        const name = g.name || g.subject || jid;
+        const inCategories = Object.keys(categories || {}).filter(
+          (cat) => (categories[cat] || []).includes(jid)
         );
-        return { name, jid, category: foundCat || null }; // ✅ include JID for round-trip safety
+        return { name, jid, categories: inCategories }; // array, not single
       });
 
-      return res.json({ categories: categoryNames, groups });
+      return res.json({
+        categories: Object.keys(categories || {}),
+        groups,                      // [{ name, jid, categories: [...] }]
+        mapping: categories || {},   // keep the canonical mapping too
+      });
     } catch (err) {
-      console.error(`[${username}] Error in get-categories:`, err.message);
+      console.error(`[${req.params.username}] Error in get-categories:`, err.message);
       return res.status(500).json({ error: "Internal server error" });
     }
   });
