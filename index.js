@@ -22,9 +22,11 @@ const {
 
 const {
   autoScanAndCategorise,
-  handleBroadcastMessage
+  handleBroadcastMessage,
+  cleanCategories // <-- import clean
 } = require("./lib/broadcast");
 
+const { handleIncomingImage } = require("./lib/media"); // <-- import image capture
 const { cleanupOldMedia } = require("./cleanup");
 const { loadUserState, saveUserState, notifyFrontend, getFrontendStatus } = require("./lib/state");
 
@@ -166,7 +168,9 @@ function bindEventListeners(sock, username) {
             u.qrPausedUntil = now + COOLDOWN_MS;
             u.lastQR = null;
             notifyFrontend(username, { qrAvailable: false });
-            console.warn(`[${username}] ⚠️ Too many QR attempts. Paused ${COOLDOWN_MS/60000}m`);
+            console.warn(
+              `[${username}] ⚠️ Too many QR attempts. Paused ${COOLDOWN_MS / 60000}m`
+            );
             try {
               await sock.sendMessage(u.ownerJid || sock.user.id, {
                 text: `⚠️ Too many QR attempts. Paused 30 minutes. Try later.`
@@ -211,6 +215,15 @@ function bindEventListeners(sock, username) {
         try {
           u.readyForHeavyTasks = true;
           await autoScanAndCategorise(username, sock);
+          // NEW: clean categories after a fresh scan to fix stale JIDs
+          try {
+            const res = cleanCategories(username);
+            console.log(
+              `[${username}] cleanCategories: kept=${res.kept} fixed=${res.fixed} dropped=${res.dropped}`
+            );
+          } catch (e) {
+            console.warn(`[${username}] cleanCategories failed: ${e?.message || e}`);
+          }
           await persistUserState(username);
         } catch (e) {
           console.error(`[${username}] autoScan error`, e);
@@ -277,8 +290,28 @@ function bindEventListeners(sock, username) {
         const fromMe = !!msg?.key?.fromMe;
         const kinds = Object.keys(msg?.message || {}).join("|") || "none";
         console.log(
-          `[${username}] rx: chat=${jid} self=${bareJid(jid)===bareJid(u.ownerJid)} fromMe=${fromMe} kinds=${kinds}`
+          `[${username}] rx: chat=${jid} self=${bareJid(jid)===bareJid(USERS[username]?.ownerJid)} fromMe=${fromMe} kinds=${kinds}`
         );
+
+        // (optional) learn owner from first DM if not set
+        if (!USERS[username].ownerJid && jid.endsWith('@s.whatsapp.net')) {
+          USERS[username].ownerJid = jid;
+          console.log(`[${username}] learned ownerJid = ${USERS[username].ownerJid}`);
+        }
+
+        // If owner sends an image and we're in media mode, capture it to memory
+        const isOwnerChat = !!USERS[username]?.ownerJid && String(jid) === String(USERS[username].ownerJid);
+        const hasImage = !!msg?.message?.imageMessage;
+        if (isOwnerChat && hasImage && (USERS[username].mode === 'media' || !USERS[username].mode)) {
+          try {
+            const captionText = msg.message.imageMessage.caption || '';
+            await handleIncomingImage({ sock, USERS, username, msg, captionText });
+            await sock.safeSend(jid, { text: '🖼️ Image saved. Use /cats to choose where to send.' }).catch(()=>{});
+          } catch (e) {
+            console.warn(`[${username}] failed to capture image: ${e?.message || e}`);
+          }
+        }
+
         await handleBroadcastMessage(username, msg, sock);
       }
     } catch (e) {
