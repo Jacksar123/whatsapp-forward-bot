@@ -403,6 +403,9 @@ app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (user
   delete USERS[username];
 }));
 
+// ✅ NEW: live group list (ground-truth JIDs)
+app.use("/admin/list-groups", require("./routes/list-groups")(USERS));
+
 // create user
 app.post("/create-user", async (req, res) => {
   try {
@@ -555,6 +558,7 @@ setInterval(logMem, 120_000);
 
 /* --------------------------------- start -------------------------------- */
 
+console.log("[broadcast] build=warm406+r2 DIAG/targets/membership"); // banner
 app.listen(PORT, HOST, () => {
   console.log(`🚀 server running http://${HOST}:${PORT}`);
   const BOOT_USER = process.env.BOOT_USER;
