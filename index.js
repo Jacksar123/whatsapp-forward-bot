@@ -23,10 +23,10 @@ const {
 const {
   autoScanAndCategorise,
   handleBroadcastMessage,
-  cleanCategories // <-- import clean
+  cleanCategories
 } = require("./lib/broadcast");
 
-const { handleIncomingImage } = require("./lib/media"); // <-- import image capture
+const { handleIncomingImage } = require("./lib/media");
 const { cleanupOldMedia } = require("./cleanup");
 const { loadUserState, saveUserState, notifyFrontend, getFrontendStatus } = require("./lib/state");
 
@@ -106,7 +106,7 @@ async function wipeAuth(username) {
   try {
     const p = getUserPaths(username);
     await fs.remove(p.auth);
-    console.log(`[${username}] 🔥 Auth folder wiped`);
+    console.log(`[${username}] Auth folder wiped`);
   } catch (e) {
     console.warn(`[${username}] auth wipe failed: ${e.message}`);
   }
@@ -126,6 +126,23 @@ async function endSession(u = {}) {
   u.socketActive = false;
   u.connecting = false;
   u.readyForHeavyTasks = false;
+}
+
+// Clear user state function
+function clearUserState(username) {
+  const u = USERS[username];
+  if (u) {
+    u.ignoreIds = new Set();
+    u.pendingImage = null;
+    u.pendingText = null;
+    u.awaitingCategory = false;
+    u.lastPromptChat = null;
+    if (u.categoryTimeout) {
+      clearTimeout(u.categoryTimeout);
+      u.categoryTimeout = null;
+    }
+    console.log(`[${username}] User state cleared`);
+  }
 }
 
 /* ------------------------------ event binder ---------------------------- */
@@ -150,7 +167,7 @@ function bindEventListeners(sock, username) {
     const { connection, lastDisconnect, qr } = update;
     const now = Date.now();
 
-    // ---- QR cooldown + debounce ----
+    // ---- QR handling with state reset ----
     if (qr) {
       const COOLDOWN_MS = 30 * 60 * 1000; // 30m
       if (u.qrPausedUntil && now < u.qrPausedUntil) {
@@ -161,37 +178,42 @@ function bindEventListeners(sock, username) {
           u.lastQR = qr;
           u.qrTs = now;
           u.qrAttempts = (u.qrAttempts || 0) + 1;
+          
+          // CRITICAL FIX: Clear problematic state on QR generation
+          clearUserState(username);
+          
           notifyFrontend(username, { qrAvailable: true });
-          console.log(`[${username}] 🔄 QR generated (attempt ${u.qrAttempts})`);
+          console.log(`[${username}] QR generated (attempt ${u.qrAttempts}) - state cleared`);
 
           if (u.qrAttempts >= MAX_QR_ATTEMPTS) {
             u.qrPausedUntil = now + COOLDOWN_MS;
             u.lastQR = null;
             notifyFrontend(username, { qrAvailable: false });
-            console.warn(
-              `[${username}] ⚠️ Too many QR attempts. Paused ${COOLDOWN_MS / 60000}m`
-            );
-            try {
-              await sock.sendMessage(u.ownerJid || sock.user.id, {
-                text: `⚠️ Too many QR attempts. Paused 30 minutes. Try later.`
-              });
-            } catch {}
+            console.warn(`[${username}] Too many QR attempts. Paused ${COOLDOWN_MS / 60000}m`);
           }
         }
       }
     }
 
     if (connection === "open") {
+      // CRITICAL FIX: Reset all problematic state on connection
       u.socketActive = true;
       u.connecting = false;
       u.ended = false;
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
+      
+      // Clear all potentially problematic state
+      clearUserState(username);
 
       const selfId = sock?.user?.id || "";
       u.selfJid = selfId;
-      console.log(`[${username}] BOT JID: ${selfId}`);
-      u.ownerJid = bareJid(selfId);
+      
+      // CRITICAL FIX: Set owner immediately and clearly
+      const ownerJid = bareJid(selfId);
+      u.ownerJid = ownerJid;
+      
+      console.log(`[${username}] CONNECTION OPEN - BOT JID: ${selfId}, OWNER SET TO: ${ownerJid}`);
 
       u.lastQR = null;
       u.qrAttempts = 0;
@@ -199,6 +221,7 @@ function bindEventListeners(sock, username) {
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
+      // Send greeting only once
       if (!u.greeted) {
         u.greeted = true;
         const greeting =
@@ -208,14 +231,21 @@ function bindEventListeners(sock, username) {
           `• /cats — pick a category to send to\n` +
           `• /rescan — refresh groups\n\n` +
           `Now send a message or image to broadcast.`;
-        try { await sock.sendMessage(u.ownerJid, { text: greeting }); } catch {}
+        try { 
+          await sock.sendMessage(ownerJid, { text: greeting }); 
+          console.log(`[${username}] Greeting sent to ${ownerJid}`);
+        } catch (e) {
+          console.warn(`[${username}] Failed to send greeting: ${e.message}`);
+        }
       }
 
+      // Delayed initialization
       setTimeout(async () => {
         try {
           u.readyForHeavyTasks = true;
           await autoScanAndCategorise(username, sock);
-          // NEW: clean categories after a fresh scan to fix stale JIDs
+          
+          // Clean categories after scan
           try {
             const res = cleanCategories(username);
             console.log(
@@ -244,9 +274,10 @@ function bindEventListeners(sock, username) {
       console.warn(`[${username}] Connection closed: code=${code} message=${message}`);
 
       if (String(message).toLowerCase().includes("bad-mac")) {
-        console.error(`[${username}] ❌ Bad MAC → wiping auth & relogin`);
+        console.error(`[${username}] Bad MAC → wiping auth & relogin`);
         await endSession(u);
         await wipeAuth(username);
+        clearUserState(username);
         setTimeout(() => startUserSession(username).catch(() => {}), 3000);
         return;
       }
@@ -254,6 +285,7 @@ function bindEventListeners(sock, username) {
       await endSession(u);
       u.qrAttempts = 0;
       u.qrPausedUntil = 0;
+      clearUserState(username);
 
       switch (code) {
         case 408:
@@ -289,20 +321,22 @@ function bindEventListeners(sock, username) {
         const jid = msg?.key?.remoteJid || "";
         const fromMe = !!msg?.key?.fromMe;
         const kinds = Object.keys(msg?.message || {}).join("|") || "none";
+        
+        // CRITICAL FIX: Better debugging
         console.log(
-          `[${username}] rx: chat=${jid} self=${bareJid(jid)===bareJid(USERS[username]?.ownerJid)} fromMe=${fromMe} kinds=${kinds}`
+          `[${username}] rx: chat=${jid} fromMe=${fromMe} kinds=${kinds} ownerSet=${!!u.ownerJid}`
         );
 
-        // (optional) learn owner from first DM if not set
-        if (!USERS[username].ownerJid && jid.endsWith('@s.whatsapp.net')) {
-          USERS[username].ownerJid = jid;
-          console.log(`[${username}] learned ownerJid = ${USERS[username].ownerJid}`);
+        // Set owner from first DM if not set
+        if (!u.ownerJid && jid.endsWith('@s.whatsapp.net') && !fromMe) {
+          u.ownerJid = jid;
+          console.log(`[${username}] OWNER LEARNED FROM DM: ${u.ownerJid}`);
         }
 
-        // If owner sends an image and we're in media mode, capture it to memory
-        const isOwnerChat = !!USERS[username]?.ownerJid && String(jid) === String(USERS[username].ownerJid);
+        // Handle incoming images from owner
+        const isOwnerChat = !!u?.ownerJid && String(jid) === String(u.ownerJid);
         const hasImage = !!msg?.message?.imageMessage;
-        if (isOwnerChat && hasImage && (USERS[username].mode === 'media' || !USERS[username].mode)) {
+        if (isOwnerChat && hasImage && (u.mode === 'media' || !u.mode)) {
           try {
             const captionText = msg.message.imageMessage.caption || '';
             await handleIncomingImage({ sock, USERS, username, msg, captionText });
@@ -312,7 +346,12 @@ function bindEventListeners(sock, username) {
           }
         }
 
-        await handleBroadcastMessage(username, msg, sock);
+        // CRITICAL FIX: Always process messages through broadcast handler
+        try {
+          await handleBroadcastMessage(username, msg, sock);
+        } catch (e) {
+          console.error(`[${username}] handleBroadcastMessage error:`, e.message);
+        }
       }
     } catch (e) {
       console.error(`[${username}] messages.upsert error`, e);
@@ -340,6 +379,7 @@ async function startUserSession(username) {
   const savedCategories = persisted.categories || readJSON(paths.categories, {});
   const savedGroups = persisted.groups || readJSON(paths.groups, {});
 
+  // CRITICAL FIX: Initialize with clean state
   Object.assign(USERS[username], {
     categories: savedCategories,
     allGroups: savedGroups,
@@ -356,7 +396,9 @@ async function startUserSession(username) {
     reconnectDelay: RECONNECT_BASE_MS,
     readyForHeavyTasks: false,
     selfJid: null,
-    ownerJid: existing.ownerJid || null
+    ownerJid: existing.ownerJid || null,
+    ignoreIds: new Set(), // CRITICAL FIX: Initialize clean
+    greeted: false
   });
 
   const logger = P({ level: "silent" });
@@ -376,13 +418,20 @@ async function startUserSession(username) {
     generateHighQualityLinkPreview: false,
   });
 
+  // CRITICAL FIX: Simplified safeSend
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
     try {
-      return await sock.sendMessage(jid, content, opts);
+      const result = await sock.sendMessage(jid, content, opts);
+      console.log(`[${username}] safeSend successful to ${jid}`);
+      return result;
     } catch (err) {
-      if (/Connection Closed|SOCKET_NOT_OPEN/i.test(err?.message)) return;
+      if (/Connection Closed|SOCKET_NOT_OPEN/i.test(err?.message)) {
+        console.warn(`[${username}] safeSend failed - connection closed`);
+        return;
+      }
+      console.error(`[${username}] safeSend error:`, err.message);
       throw err;
     }
   };
@@ -396,16 +445,28 @@ async function startUserSession(username) {
   console.log(`[INIT] session started for ${username}`);
 }
 
+// Function to restart problematic sessions
+async function restartUserSession(username) {
+  console.log(`[${username}] Restarting session...`);
+  const u = USERS[username];
+  if (u) {
+    await endSession(u);
+    clearUserState(username);
+    delete USERS[username];
+  }
+  return await startUserSession(username);
+}
+
 /* -------------------------------- express -------------------------------- */
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
 
-// ----- CORS (env override supported) -----
+// ----- CORS -----
 const DEFAULT_ALLOWED = [
   "https://whats-broadcast-hub.lovable.app",
   "https://preview--whats-broadcast-hub.lovable.app",
-  "https://forwardly.online" // add your custom domain here
+  "https://forwardly.online"
 ];
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || DEFAULT_ALLOWED.join(","))
   .split(",")
@@ -436,7 +497,6 @@ app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (user
   delete USERS[username];
 }));
 
-// ✅ NEW: live group list (ground-truth JIDs)
 app.use("/admin/list-groups", require("./routes/list-groups")(USERS));
 
 // create user
@@ -451,6 +511,18 @@ app.post("/create-user", async (req, res) => {
     res.json({ ok: true, username });
   } catch (e) {
     console.error("/create-user failed:", e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// CRITICAL FIX: Add restart endpoint
+app.post("/restart-session/:username", async (req, res) => {
+  try {
+    const { username } = req.params;
+    await restartUserSession(username);
+    res.json({ ok: true, message: "Session restarted successfully" });
+  } catch (e) {
+    console.error(`/restart-session failed for ${username}:`, e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -499,6 +571,7 @@ app.post("/reset-qr/:username", (req, res) => {
   u.lastQR = null;
   u.qrAttempts = 0;
   u.qrPausedUntil = 0;
+  clearUserState(req.params.username);
   notifyFrontend(req.params.username, { qrAvailable: false });
   res.json({ ok: true });
 });
@@ -515,7 +588,17 @@ app.get("/get-qr/:username", (req, res) => {
 app.get("/debug/state/:username", async (req, res) => {
   try {
     const data = await loadUserState(req.params.username);
-    res.json({ username: req.params.username, ...data });
+    const u = USERS[req.params.username];
+    res.json({ 
+      username: req.params.username, 
+      ...data,
+      runtime: {
+        socketActive: !!u?.socketActive,
+        ownerJid: u?.ownerJid,
+        connecting: !!u?.connecting,
+        ignoreIdsSize: u?.ignoreIds?.size || 0
+      }
+    });
   } catch (e) {
     res.status(500).json({ error: "failed" });
   }
@@ -550,7 +633,9 @@ if (fs.existsSync(usersDirPath)) {
       reconnectDelay: RECONNECT_BASE_MS,
       readyForHeavyTasks: false,
       selfJid: null,
-      ownerJid: null
+      ownerJid: null,
+      ignoreIds: new Set(),
+      greeted: false
     };
     console.log(`[INIT] Rehydrated ${username}`);
   }
@@ -574,13 +659,14 @@ setInterval(() => {
         try {
           if (u.ownerJid) {
             await u.sock?.safeSend?.(u.ownerJid, {
-              text: `🕒 Session paused due to inactivity.\nReopen dashboard to resume:\n${DASHBOARD_URL}`
+              text: `🕐 Session paused due to inactivity.\nReopen dashboard to resume:\n${DASHBOARD_URL}`
             }).catch(() => {});
           }
         } catch {}
         await persistUserState(username);
         await endSession(u);
         await wipeAuth(username);
+        clearUserState(username);
         notifyFrontend(username, { connected: false, needsRelink: true, qrAvailable: false });
       })();
     }
@@ -591,7 +677,7 @@ setInterval(logMem, 120_000);
 
 /* --------------------------------- start -------------------------------- */
 
-console.log("[broadcast] build=warm406+r2 DIAG/targets/membership"); // banner
+console.log("[broadcast] build=fixed-message-handling DIAG/echo-detection-fixed");
 app.listen(PORT, HOST, () => {
   console.log(`🚀 server running http://${HOST}:${PORT}`);
   const BOOT_USER = process.env.BOOT_USER;
