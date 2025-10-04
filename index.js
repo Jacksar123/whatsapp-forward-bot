@@ -145,12 +145,12 @@ function clearUserState(username) {
   }
 }
 
-/* ------------------------------ event binder ---------------------------- */
-
 function bareJid(j) {
   const s = String(j || "");
   return s.replace(/:[^@]+(?=@)/, "");
 }
+
+/* ------------------------------ event binder ---------------------------- */
 
 function bindEventListeners(sock, username) {
   const u = USERS[username];
@@ -178,10 +178,10 @@ function bindEventListeners(sock, username) {
           u.lastQR = qr;
           u.qrTs = now;
           u.qrAttempts = (u.qrAttempts || 0) + 1;
-          
-          // CRITICAL FIX: Clear problematic state on QR generation
+
+          // Reset interaction state when showing a new QR
           clearUserState(username);
-          
+
           notifyFrontend(username, { qrAvailable: true });
           console.log(`[${username}] QR generated (attempt ${u.qrAttempts}) - state cleared`);
 
@@ -196,23 +196,22 @@ function bindEventListeners(sock, username) {
     }
 
     if (connection === "open") {
-      // CRITICAL FIX: Reset all problematic state on connection
+      // Reset all problematic state on connection
       u.socketActive = true;
       u.connecting = false;
       u.ended = false;
       u.lastOpenAt = Date.now();
       u.lastActive = Date.now();
-      
-      // Clear all potentially problematic state
+
       clearUserState(username);
 
       const selfId = sock?.user?.id || "";
       u.selfJid = selfId;
-      
-      // CRITICAL FIX: Set owner immediately and clearly
+
+      // *** CRITICAL: owner is ALWAYS the phone itself (self chat only) ***
       const ownerJid = bareJid(selfId);
       u.ownerJid = ownerJid;
-      
+
       console.log(`[${username}] CONNECTION OPEN - BOT JID: ${selfId}, OWNER SET TO: ${ownerJid}`);
 
       u.lastQR = null;
@@ -221,7 +220,7 @@ function bindEventListeners(sock, username) {
       u.reconnectDelay = RECONNECT_BASE_MS;
       notifyFrontend(username, { connected: true, needsRelink: false, qrAvailable: false });
 
-      // Send greeting only once
+      // Greeting only once
       if (!u.greeted) {
         u.greeted = true;
         const greeting =
@@ -231,20 +230,20 @@ function bindEventListeners(sock, username) {
           `• /cats — pick a category to send to\n` +
           `• /rescan — refresh groups\n\n` +
           `Now send a message or image to broadcast.`;
-        try { 
-          await sock.sendMessage(ownerJid, { text: greeting }); 
+        try {
+          await sock.sendMessage(ownerJid, { text: greeting });
           console.log(`[${username}] Greeting sent to ${ownerJid}`);
         } catch (e) {
           console.warn(`[${username}] Failed to send greeting: ${e.message}`);
         }
       }
 
-      // Delayed initialization
+      // Delayed init for heavy tasks
       setTimeout(async () => {
         try {
           u.readyForHeavyTasks = true;
           await autoScanAndCategorise(username, sock);
-          
+
           // Clean categories after scan
           try {
             const res = cleanCategories(username);
@@ -321,32 +320,43 @@ function bindEventListeners(sock, username) {
         const jid = msg?.key?.remoteJid || "";
         const fromMe = !!msg?.key?.fromMe;
         const kinds = Object.keys(msg?.message || {}).join("|") || "none";
-        
-        // CRITICAL FIX: Better debugging
+
         console.log(
           `[${username}] rx: chat=${jid} fromMe=${fromMe} kinds=${kinds} ownerSet=${!!u.ownerJid}`
         );
 
-        // Set owner from first DM if not set
-        if (!u.ownerJid && jid.endsWith('@s.whatsapp.net') && !fromMe) {
-          u.ownerJid = jid;
-          console.log(`[${username}] OWNER LEARNED FROM DM: ${u.ownerJid}`);
+        // *** STRICT SELF-CHAT ONLY ***
+        // Self chat is: bareJid(jid) === bareJid(sock.user.id)
+        const selfBare = bareJid(u.selfJid || sock?.user?.id || "");
+        const chatBare = bareJid(jid);
+
+        // Ignore any inbound NOT in self chat if it's not from me
+        if (!fromMe && chatBare !== selfBare) {
+          continue; // drops client DMs → prevents spam
+        }
+        // (Optional extra safety) If fromMe but not in self chat, ignore too
+        if (fromMe && chatBare !== selfBare) {
+          continue; // prevents accidental echoes into other DMs
         }
 
-        // Handle incoming images from owner
-        const isOwnerChat = !!u?.ownerJid && String(jid) === String(u.ownerJid);
+        // *** IMPORTANT: remove "learn owner from first DM" behavior ***
+        // (We no longer set u.ownerJid from random DMs.)
+        u.ownerJid = selfBare;
+
+        // Handle incoming images ONLY in self chat (owner)
+        const isOwnerChat = chatBare === selfBare;
         const hasImage = !!msg?.message?.imageMessage;
-        if (isOwnerChat && hasImage && (u.mode === 'media' || !u.mode)) {
+        if (isOwnerChat && hasImage && (u.mode === "media" || !u.mode)) {
           try {
-            const captionText = msg.message.imageMessage.caption || '';
+            const captionText = msg.message.imageMessage.caption || "";
             await handleIncomingImage({ sock, USERS, username, msg, captionText });
-            await sock.safeSend(jid, { text: '🖼️ Image saved. Use /cats to choose where to send.' }).catch(()=>{});
+            await sock.safeSend(jid, { text: "🖼️ Image saved. Use /cats to choose where to send." }).catch(() => {});
           } catch (e) {
             console.warn(`[${username}] failed to capture image: ${e?.message || e}`);
           }
         }
 
-        // CRITICAL FIX: Always process messages through broadcast handler
+        // Always process via broadcast core (it has its own guards too)
         try {
           await handleBroadcastMessage(username, msg, sock);
         } catch (e) {
@@ -379,7 +389,7 @@ async function startUserSession(username) {
   const savedCategories = persisted.categories || readJSON(paths.categories, {});
   const savedGroups = persisted.groups || readJSON(paths.groups, {});
 
-  // CRITICAL FIX: Initialize with clean state
+  // Initialize clean runtime state
   Object.assign(USERS[username], {
     categories: savedCategories,
     allGroups: savedGroups,
@@ -397,7 +407,7 @@ async function startUserSession(username) {
     readyForHeavyTasks: false,
     selfJid: null,
     ownerJid: existing.ownerJid || null,
-    ignoreIds: new Set(), // CRITICAL FIX: Initialize clean
+    ignoreIds: new Set(),
     greeted: false
   });
 
@@ -415,20 +425,19 @@ async function startUserSession(username) {
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
     syncFullHistory: false,
-    generateHighQualityLinkPreview: false,
+    generateHighQualityLinkPreview: false
   });
 
-  // CRITICAL FIX: Simplified safeSend
+  // safeSend wrapper (handles closed socket quietly)
   sock.safeSend = async (jid, content, opts = {}) => {
     const u = USERS[username];
     if (!u?.socketActive) throw new Error("SOCKET_NOT_OPEN");
     try {
       const result = await sock.sendMessage(jid, content, opts);
-      console.log(`[${username}] safeSend successful to ${jid}`);
       return result;
     } catch (err) {
-      if (/Connection Closed|SOCKET_NOT_OPEN/i.test(err?.message)) {
-        console.warn(`[${username}] safeSend failed - connection closed`);
+      if (/Connection Closed|SOCKET_NOT_OPEN|stream closed/i.test(err?.message)) {
+        console.warn(`[${username}] safeSend dropped (socket closed)`);
         return;
       }
       console.error(`[${username}] safeSend error:`, err.message);
@@ -496,7 +505,6 @@ app.use("/admin", require("./routes/admin")(USERS, startUserSession, async (user
   await endSession(u);
   delete USERS[username];
 }));
-
 app.use("/admin/list-groups", require("./routes/list-groups")(USERS));
 
 // create user
@@ -515,14 +523,14 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// CRITICAL FIX: Add restart endpoint
+// restart
 app.post("/restart-session/:username", async (req, res) => {
   try {
     const { username } = req.params;
     await restartUserSession(username);
     res.json({ ok: true, message: "Session restarted successfully" });
   } catch (e) {
-    console.error(`/restart-session failed for ${username}:`, e);
+    console.error(`/restart-session failed for ${req.params.username}:`, e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -589,8 +597,8 @@ app.get("/debug/state/:username", async (req, res) => {
   try {
     const data = await loadUserState(req.params.username);
     const u = USERS[req.params.username];
-    res.json({ 
-      username: req.params.username, 
+    res.json({
+      username: req.params.username,
       ...data,
       runtime: {
         socketActive: !!u?.socketActive,
